@@ -21,11 +21,11 @@ KV→Host 卸载最小闭环（卸→存→召回→结果正确）。本包不�
 ## 1. 上传与加载
 
 ```bash
-# 仓收录后由 clone_all 落在 <公共仓根>/memory-manager/；以下按该路径示例。
+# 仓收录后由 clone_all 落在 <公共仓根>/FlagMemory/；以下按该路径示例。
 # 容器内 PYTHONPATH 指仓根（offload/ 的父目录），scheduler 和 worker 进程都要能 import：
-export PYTHONPATH=/workspace/memory-manager:$PYTHONPATH
+export PYTHONPATH=/workspace/FlagMemory:$PYTHONPATH
 # 模块路径相应写 offload.npu_offload（见 §2）；远程机上没有仓时 scp 整仓即可：
-#   scp -r memory-manager <910C节点>:~/runtime-team/dev/memory/probes/910c/
+#   scp -r FlagMemory <910C节点>:~/runtime-team/dev/memory/probes/910c/
 ```
 
 ## 2. 启动命令（在 10/12 复测基线命令上加两处）

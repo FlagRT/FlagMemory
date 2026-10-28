@@ -1,8 +1,9 @@
-# memory-manager —— 显存方向交付仓
+# FlagMemory —— 显存方向交付仓
 
 显存（memory）方向的交付物收拢仓：KV 卸载、OOM 防护、显存画像、pip 功能包。
 自建仓（`kind: direction`），main 单线；收录进公共仓 `dev/repos.yaml` 后由 `clone_all.sh`
-对齐到各开发机，容器内挂载引用名 `/workspace/memory-manager`。
+对齐到各开发机，容器内挂载引用名 `/workspace/FlagMemory`。
+> 命名注记：GitHub 仓名 `FlagMemory`；历史实验记录与早期服务器工作目录中的 `memory-manager` 为当时名称，证据文档保留不改。
 
 ## 结构
 
@@ -18,7 +19,7 @@
 栈外模块，不改任何栈代码。两步：
 
 1. 仓根进 PYTHONPATH（scheduler 与 worker 进程都要能 import）：
-   `export PYTHONPATH=/workspace/memory-manager:$PYTHONPATH`
+   `export PYTHONPATH=/workspace/FlagMemory:$PYTHONPATH`
 2. `--kv-transfer-config` 写对应模块路径与类名：
 
 | 栈 | kv_connector | kv_connector_module_path |

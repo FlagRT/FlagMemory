@@ -15,7 +15,7 @@ docker run -d --name cyx-ppu-vllm-smoke --network host --shm-size 8g \
   -v /bmcp_lvm_fs/zhenghaojia/models/Llama-3.2-1B-Instruct:/models/llama1b:ro \
   --entrypoint bash <IMAGE> -c '
     source /usr/local/PPU_SDK/envsetup.sh;
-    export UMD_PLATFORM_TYPE=1 HGGC_DRIVER_CANDIDATE=UMD PYTHONPATH=/work/memory-manager;
+    export UMD_PLATFORM_TYPE=1 HGGC_DRIVER_CANDIDATE=UMD PYTHONPATH=/work/FlagMemory;
     vllm serve /models/llama1b --served-model-name tiny --port 18330 \
       --gpu-memory-utilization 0.3 --enforce-eager --max-model-len 1024 \
       --kv-cache-memory-bytes 33554432 \

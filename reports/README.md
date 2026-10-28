@@ -5,7 +5,7 @@
 
 | 目录 | 内容 | 对应工作 |
 |---|---|---|
-| `p800_results_1023/` | RESULT_W1诊断_P800昆仑_20261023.md | P800 W1 诊断 + 卸载链路闭环起点 |
+| `p800_results_1023/` | RESULT_诊断与四步闭环_P800昆仑_20261023.md | P800 W1 诊断 + 当日递进至 W2 四步闭环全通（含三模型链） |
 | `p800_results_1024/` | RESULT_AB卸载开关_P800昆仑_20261024.md | P800 真模型 A/B 收口（暖跑配对口径） |
 | `p800_results_1025/` | PLAN + RESULT_{P800,910C} + 通俗版 + proto/ + proto-910c/ | 画像规范 v0.3 首次双芯执行（真模型全流程）；proto* 为逐腿原始 JSON |
 | `ppu_1026/` | PLAN_AB + RESULT_AB卸载开关_PPU_20261026.md | PPU ppu_offload 移植闭环 + 开关冒烟对照 |
