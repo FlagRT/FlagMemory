@@ -9,4 +9,4 @@
 | `p800_results_1024/` | RESULT_AB卸载开关_P800昆仑_20261024.md | P800 真模型 A/B 收口（暖跑配对口径） |
 | `p800_results_1025/` | PLAN + RESULT_{P800,910C} + 通俗版 + proto/ + proto-910c/ | 画像规范 v0.3 首次双芯执行（真模型全流程）；proto* 为逐腿原始 JSON |
 | `ppu_1026/` | PLAN_AB + RESULT_AB卸载开关_PPU_20261026.md | PPU ppu_offload 移植闭环 + 开关冒烟对照 |
-| `p800_results_1027/` | PLAN_规范验证跑_真模型_20261027.md | 进行中：真模型全流程增量验证（新仓路径/load 补腿/自然池锚点档）；原始数据与报告待本轮收口后追加 |
+| `p800_results_1027/` | PLAN + RESULT_规范验证跑_真模型（技术版+通俗版）+ proto_lock/ + proto_nat/ + kit/ | 真模型全流程增量验证收口（2026-10-27/28，OneRec-8B，64GiB 锁定档+自然池档双锚点）：新仓重挂载零漂移、load 侧补腿首次测成、L/R 按预注册判据记无效；proto* 为逐腿原始 JSON 与 DMA marker 账本 |
