@@ -14,6 +14,18 @@
 | `profile/` | 显存画像工具链 | 11 月收拢 |
 | `docs/` | runbook 与报告指针 | 正式报告在公共仓 dev-1.0 |
 
+## 安装
+
+标准 pip 包（包名 `flagmemory`），零依赖——torch/vLLM 由宿主栈环境自带，本包不替环境定版本：
+
+```bash
+pip install -e .   # 在仓根执行；editable 安装，源码即生效
+```
+
+安装后 `import offload` 即可寻址（`PYTHONPATH` 不再必需）；`--kv-transfer-config`
+的模块路径写法不变（见下表）。不安装、仅把仓根加入 `PYTHONPATH` 的旧用法继续有效。
+`offload/probes/` 为脚本集（无 `__init__.py`，不作为模块接口），文件随包携带，按 RUNBOOK 原样调用。
+
 ## connector 快速使用
 
 栈外模块，不改任何栈代码。两步：

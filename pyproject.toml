@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flagmemory"
+version = "0.1.0"
+description = "FlagMemory: 显存方向交付件——KV→Host 卸载 connector（Ascend 910C / 昆仑 P800 / PPU 三栈）与配套探针"
+requires-python = ">=3.10"
+# 刻意零依赖：torch / vLLM 由宿主栈环境自带（各芯片容器的版本互不兼容），
+# 本包只外挂加载，不替环境决定任何版本。
+dependencies = []
+
+[tool.setuptools.packages.find]
+# 只收有 __init__.py 的子包；offload/probes/ 是脚本集（无 __init__）自动排除，
+# docs/ reports/ 在包外不入 wheel。import 路径保持 offload.*：
+# vLLM kv-transfer-config、serve 脚本与 RUNBOOK 不因 pip 化而改动。
+include = ["offload*"]
