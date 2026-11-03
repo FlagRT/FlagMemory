@@ -1,0 +1,38 @@
+# 持续集成（ADR-0014 §3.5 第 2 件改造的「持续集成」那一项）。
+#
+# 刻意**不装 torch / vLLM，也不碰真卡**：
+#   - 本包零依赖，四家芯片容器里的 torch / vLLM 版本互不兼容，CI 里装不出一套「正确」的；
+#   - 池本体与能力层本来就不许碰框架（分层门禁静态把关），所以无框架环境正是它们该跑的环境；
+#   - 真卡用例标了 `realcard`，被 pytest 的 `addopts = "-m 'not realcard'"` deselect，
+#     要在带卡机器的宿主栈容器内用 `pytest -m realcard` 跑（见 tests/README.md）。
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 下限对齐 pyproject 的 requires-python = ">=3.10"；上限取一个主流档。
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 装本包与开发依赖（不含 torch / vLLM）
+        run: pip install -e ".[dev]"
+
+      - name: 分层门禁（池本体与能力层不碰框架、方向只许向下）
+        run: python tools/check_layering.py
+
+      - name: 单测（真卡用例自动 deselect）
+        run: pytest
