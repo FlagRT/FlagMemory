@@ -12,9 +12,9 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import PIN_MEMORY
-from offload.ppu_offload.ppu_copy_backend import DmaCopyBackend
-from offload.ppu_offload.ppu_mem_ops import pin_tensor_or_fallback
-from offload.ppu_offload.metadata import (
+from .ppu_copy_backend import DmaCopyBackend
+from .ppu_mem_ops import pin_tensor_or_fallback
+from .metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
 )

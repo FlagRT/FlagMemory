@@ -13,7 +13,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from offload.ppu_offload.ppu_mem_ops import (
+from .ppu_mem_ops import (
     CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
     CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
     BatchMemcpyParams,

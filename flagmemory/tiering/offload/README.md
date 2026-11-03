@@ -1,21 +1,24 @@
-# offload/ —— KV→Host 卸载 connector（三栈）
+# flagmemory/tiering/offload/ —— KV→Host 卸载 connector（三栈）
 
-栈外模块，经 vLLM `kv_connector_module_path` 外挂加载，不改任何栈代码。
-使用前提：**仓根（本目录的父目录）在 PYTHONPATH 上**，scheduler 与 worker 进程都要能 import。
+分层存储下的**框架绑定适配层**，经 vLLM `kv_connector_module_path` 外挂加载，不改任何栈代码。
+池本体不经过这里，也不反向依赖这里。
+使用前提：**仓根在 PYTHONPATH 上**（或 `pip install -e .`），scheduler 与 worker 进程都要能 import。
 
 ## 子包一览
 
 | 子包 | 芯片/栈 | 导出类 | kv_connector_module_path | 实测状态 |
 |---|---|---|---|---|
-| `npu_offload/` | Ascend 910C · vllm-ascend v0.20.2rc1 | `NpuSimpleCPUOffloadConnector` | `offload.npu_offload` | W2 闭环 + W3 开关对照（2026-10-14 报告） |
-| `xpu_offload/` | 昆仑 P800 · vllm-plugin-fl 0.2.0 | `XpuSimpleCPUOffloadConnector` | `offload.xpu_offload` | 四步闭环（2026-10-23），真模型 A/B 11 月补 |
-| `ppu_offload/` | PPU ZW810E · vllm-plugin-fl 0.3.0 + vllm 0.24.0 | `PpuSimpleCPUOffloadConnector` | `offload.ppu_offload` | 冒烟闭环 + A/B 对照（2026-10-26）：池内零代价、超池 200% +2.1%；真模型待排 |
+| `npu/` | Ascend 910C · vllm-ascend v0.20.2rc1 | `NpuSimpleCPUOffloadConnector` | `flagmemory.tiering.offload.npu` | W2 闭环 + W3 开关对照（2026-10-14 报告） |
+| `xpu/` | 昆仑 P800 · vllm-plugin-fl 0.2.0 | `XpuSimpleCPUOffloadConnector` | `flagmemory.tiering.offload.xpu` | 四步闭环（2026-10-23），真模型 A/B 11 月补 |
+| `ppu/` | PPU ZW810E · vllm-plugin-fl 0.3.0 + vllm 0.24.0 | `PpuSimpleCPUOffloadConnector` | `flagmemory.tiering.offload.ppu` | 冒烟闭环 + A/B 对照（2026-10-26）：池内零代价、超池 200% +2.1%；真模型待排 |
 
-`npu_offload`/`xpu_offload` 两包同构：connector（swap worker_handler）+ worker（KV 张量归一/
+旧模块路径 `offload.{npu,ppu,xpu}_offload` 由仓根兼容别名包转发，0.2.x 等效可用、0.3.0 移除。
+
+`npu`/`xpu` 两包同构：connector（swap worker_handler）+ worker（KV 张量归一/
 Host 池）+ copy_backend（守护线程 + 逐块 `copy_(non_blocking=True)` + Event 完成上报）+
 mem_ops（锁页/降级）。差异只在芯片 API 面（torch.npu vs torch.cuda）与各栈 KV cache 交付格式。
 
-`ppu_offload` 是**另一种移植路线**：源不是 0.20.2 老接口，而是 vLLM 0.24 内置
+`ppu` 是**另一种移植路线**：源不是 0.20.2 老接口，而是 vLLM 0.24 内置
 `SimpleCPUOffloadConnector` 六文件 vendor+补丁（该版实现更深绑 CUDA 批量 DMA，stock 路径
 在 PPU 上不可用）。四个补丁：
 
@@ -28,7 +31,7 @@ mem_ops（锁页/降级）。差异只在芯片 API 面（torch.npu vs torch.cud
 
 诊断标记：`[PpuOffload-DMA]`（stderr，每次 store/load 批次一行，含累计计数）、
 `[PpuOffload-SCHED]`（stderr，召回匹配的 entry/hit_len）。vllm 日志系统只放行 `vllm.*`
-logger，`offload.*` 的 logger 输出会被吞，所以诊断走 stderr。
+logger，本包的 logger 输出会被吞，所以诊断走 stderr。
 
 ## PPU 栈已知边界（2026-10-26 冒烟）
 
@@ -53,15 +56,15 @@ logger，`offload.*` 的 logger 输出会被吞，所以诊断走 stderr。
 
 | 旧 | 新（本仓） |
 |---|---|
-| PYTHONPATH 指 `w2_npu_offload` 父目录；module path `w2_npu_offload` | PYTHONPATH 指仓根；module path `offload.npu_offload` |
-| PYTHONPATH 指 `w2_xpu_offload` 父目录；module path `w2_xpu_offload` | PYTHONPATH 指仓根；module path `offload.xpu_offload` |
+| PYTHONPATH 指 `w2_npu_offload` 父目录；module path `w2_npu_offload` | PYTHONPATH 指仓根；module path `flagmemory.tiering.offload.npu` |
+| PYTHONPATH 指 `w2_xpu_offload` 父目录；module path `w2_xpu_offload` | PYTHONPATH 指仓根；module path `flagmemory.tiering.offload.xpu` |
 | 导出类名 `Npu/XpuSimpleCPUOffloadConnector` | **不变**（启动配置无需改类名） |
 | 诊断标记 `/tmp/w2x_marker_*.txt`、`/tmp/offload_diag.log` | **不变**（与服务器端探针脚本配套） |
 
 ## 启动配方
 
-- **910C**：`npu_offload/RUNBOOK.md`（基线命令 + kv-transfer-config、验收检查点、翻车表）。
-- **P800**：`probes/p800/`（serve-w2x.sh / recall_p800.py / calib_p800.py，2026-10-23 闭环原件）。
+- **910C**：`npu/RUNBOOK.md`（基线命令 + kv-transfer-config、验收检查点、翻车表）。
+- **P800**：`flagmemory/profiling/probes/p800/`（serve-w2x.sh / recall_p800.py / calib_p800.py，2026-10-23 闭环原件）。
   注意：`--kv-cache-memory-bytes` 在该栈为必填（P-0 环境级绕过）；gmu 按当时卡况调。
 
 ## 边界（两包共同）

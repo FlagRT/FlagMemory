@@ -19,7 +19,7 @@ docker run -d --name cyx-ppu-vllm-smoke --network host --shm-size 8g \
     vllm serve /models/llama1b --served-model-name tiny --port 18330 \
       --gpu-memory-utilization 0.3 --enforce-eager --max-model-len 1024 \
       --kv-cache-memory-bytes 33554432 \
-      --kv-transfer-config "{\"kv_connector\":\"PpuSimpleCPUOffloadConnector\",\"kv_connector_module_path\":\"offload.ppu_offload\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"cpu_bytes_to_use\":1073741824}}"'
+      --kv-transfer-config "{\"kv_connector\":\"PpuSimpleCPUOffloadConnector\",\"kv_connector_module_path\":\"flagmemory.tiering.offload.ppu\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"cpu_bytes_to_use\":1073741824}}"'
 ```
 
 要点：

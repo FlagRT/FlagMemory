@@ -20,13 +20,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
-from offload.ppu_offload.manager import (
+from .manager import (
     SimpleCPUOffloadScheduler,
 )
-from offload.ppu_offload.metadata import (
+from .metadata import (
     SimpleCPUOffloadMetadata,
 )
-from offload.ppu_offload.ppu_worker import (
+from .ppu_worker import (
     SimpleCPUOffloadWorker,
 )
 

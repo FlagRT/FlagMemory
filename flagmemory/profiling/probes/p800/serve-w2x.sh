@@ -1,5 +1,5 @@
 #!/bin/bash
-# W2-P800: external XpuSimpleCPUOffloadConnector (offload.xpu_offload, 原 w2_xpu_offload)
+# W2-P800: external XpuSimpleCPUOffloadConnector (flagmemory.tiering.offload.xpu)
 # on kunlun stack. PYTHONPATH 指仓根（本探针假设仓已挂 /work/FlagMemory，按实际改）。
 # No vllm-patched.py needed: our worker never calls Stream.priority_range (P-1 avoided
 # by construction) and never imports cuda-python (P-2 avoided by construction).
@@ -14,4 +14,4 @@ exec vllm serve /models/random-qwen3-tiny \
   --enforce-eager \
   --max-model-len 512 \
   --kv-cache-memory-bytes 67108864 \
-  --kv-transfer-config '{"kv_connector":"XpuSimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_module_path":"offload.xpu_offload","kv_connector_extra_config":{"cpu_bytes_to_use":134217728}}'
+  --kv-transfer-config '{"kv_connector":"XpuSimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_module_path":"flagmemory.tiering.offload.xpu","kv_connector_extra_config":{"cpu_bytes_to_use":134217728}}'

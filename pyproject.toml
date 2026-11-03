@@ -4,15 +4,27 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flagmemory"
-version = "0.1.0"
-description = "FlagMemory: 显存方向交付件——KV→Host 卸载 connector（Ascend 910C / 昆仑 P800 / PPU 三栈）与配套探针"
+version = "0.2.0"
+description = "FlagMemory: 显存池管理器组件——池本体 / 芯片能力抽象 / 分层存储（含三栈 KV 卸载）/ 性能分析工具 / 接口声明"
 requires-python = ">=3.10"
 # 刻意零依赖：torch / vLLM 由宿主栈环境自带（各芯片容器的版本互不兼容），
-# 本包只外挂加载，不替环境决定任何版本。
+# 本包只外挂加载，不替环境决定任何版本。池本体与能力层不依赖框架，无框架环境可导入。
 dependencies = []
 
+[project.optional-dependencies]
+# 开发与门禁用；真卡实测不在这里，靠 pytest 标记区分（见 tests/README.md）。
+dev = ["pytest>=8"]
+
 [tool.setuptools.packages.find]
-# 只收有 __init__.py 的子包；offload/probes/ 是脚本集（无 __init__）自动排除，
-# docs/ reports/ 在包外不入 wheel。import 路径保持 offload.*：
-# vLLM kv-transfer-config、serve 脚本与 RUNBOOK 不因 pip 化而改动。
-include = ["offload*"]
+# import 路径是 flagmemory.*；offload.* 是兼容别名包，0.2.x 有效、0.3.0 移除，
+# 存在的理由是容器里写死的 vLLM kv_connector_module_path 字符串不必跟着改。
+# flagmemory/profiling/probes/ 是脚本集（无 __init__.py）自动排除；
+# docs/ reports/ tests/ 在包外，不入 wheel。
+include = ["flagmemory*", "offload*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "realcard: 需要真卡与厂商运行时才能跑的用例（默认不跑，见 tests/README.md）",
+]
+addopts = "-m 'not realcard'"

@@ -1,7 +1,7 @@
 # KV→Host 卸载 connector（Ascend 910C / vllm-ascend 栈）—— 上机 runbook
 
-> 原 `w2_npu_offload`（2026-10 W2 实验包）迁入本仓后的版本；路径已改为
-> `offload.npu_offload`，旧名仅存在于历史报告引用中。实验结论见
+> 现行模块路径 `flagmemory.tiering.offload.npu`；旧路径 `offload.npu_offload` 由兼容别名
+> 转发（0.2.x 有效，0.3.0 移除），更早的 `w2_npu_offload` 仅存在于历史报告引用中。实验结论见
 > dev-1.0 `dev/memory/docs/goals/proto-910c-202610/` 两报告。
 
 目标：在 vllm-ascend 锁定栈（quay.io/ascend/vllm-ascend:v0.20.2rc1-a3，davinci4）上跑通
@@ -22,9 +22,9 @@ KV→Host 卸载最小闭环（卸→存→召回→结果正确）。本包不�
 
 ```bash
 # 仓收录后由 clone_all 落在 <公共仓根>/FlagMemory/；以下按该路径示例。
-# 容器内 PYTHONPATH 指仓根（offload/ 的父目录），scheduler 和 worker 进程都要能 import：
+# 容器内 PYTHONPATH 指仓根（flagmemory/ 的父目录），scheduler 和 worker 进程都要能 import：
 export PYTHONPATH=/workspace/FlagMemory:$PYTHONPATH
-# 模块路径相应写 offload.npu_offload（见 §2）；远程机上没有仓时 scp 整仓即可：
+# 模块路径相应写 flagmemory.tiering.offload.npu（见 §2）；远程机上没有仓时 scp 整仓即可：
 #   scp -r FlagMemory <910C节点>:~/runtime-team/dev/memory/probes/910c/
 ```
 
@@ -33,7 +33,7 @@ export PYTHONPATH=/workspace/FlagMemory:$PYTHONPATH
 ```bash
 vllm serve /data_lib/models/OneRec-8B \
   --enable-prefix-caching \
-  --kv-transfer-config '{"kv_connector":"NpuSimpleCPUOffloadConnector","kv_connector_module_path":"offload.npu_offload","kv_connector_extra_config":{"cpu_bytes_to_use":8589934592}}'
+  --kv-transfer-config '{"kv_connector":"NpuSimpleCPUOffloadConnector","kv_connector_module_path":"flagmemory.tiering.offload.npu","kv_connector_extra_config":{"cpu_bytes_to_use":8589934592}}'
 # 其余参数照 10/12 复测配方（gmu/max-model-len/eager 等与基线一致，保证开关对照可比）
 ```
 

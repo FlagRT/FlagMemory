@@ -1,4 +1,11 @@
-# 显存方向 KV 卸载交付件。各栈子包经 vLLM kv_connector_module_path 外挂加载，
-# 使用时把本仓根目录加入 PYTHONPATH，模块路径写 offload.<子包名>；
-# 仓根 `pip install -e .`（包名 flagmemory）后 PYTHONPATH 不再必需。
-__version__ = "0.1.0"
+"""兼容别名：旧 import 路径 offload.*，在 0.2.x 有效，0.3.0 移除。
+
+新路径是 flagmemory.tiering.offload.{npu,ppu,xpu}。别名存在的唯一理由是容器里
+已经写死的 vLLM 参数 kv_connector_module_path=offload.<栈>_offload —— 那串字符串
+继续能加载到同一个 connector 类，不必跟着改启动命令。
+
+注意：别名包本身不 import 任何栈（三套栈各绑一个宿主栈版本，同一环境里只有一套能
+导入成功），取类时才真正加载，见各别名子包的 __getattr__。
+"""
+
+__all__ = ["npu_offload", "ppu_offload", "xpu_offload"]
