@@ -15,11 +15,11 @@
 | `tiers` | 档位表：按运行时查到的分配粒度切档，池本体不内嵌粒度常数 |
 | `streams` | 流登记表：强持有到池销毁（`I-3`），刻意不 import weakref |
 | `barrier` | 回收屏障：只轮询事件 + 单调钟截止，不阻塞等待（`I-2` / `I-11`） |
-| `ledger` | 块账本：身份不复用、状态索引、分级空闲表、隔离区（`I-1`） |
+| `ledger` | 块账本：稳定底座与活租约映射、状态索引、分级空闲表、隔离区（`I-1`） |
 | `pool` | `BlockPool` 与 `create_pool`：设计文档第四节那 15 条对外操作 |
 
 对外接口的类型存根在 `flagmemory/interfaces/pool.pyi`，接口文档在
-`flagmemory/interfaces/接口文档-显存池对外接口.md`；哪些契约尚未实现见
+`flagmemory/interfaces/接口文档-显存池对外接口.md`；当前访问、关闭托管、检查入口及未实现项见
 `docs/impl/11-28-分级块池与流有序分配.md`。
 """
 

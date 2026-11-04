@@ -1,56 +1,34 @@
-# 单测说明
+# 测试说明
 
-> 依据：ADR-0014 §3.5 第 2 件改造（补单测与门禁）——「测试目录 + 测试配置 + 正常 / 边界 / 异常
-> 三类用例 + 持续集成；**池本体的测试不得依赖真卡**，真卡部分单独标记」。
-
-## 一句话：默认跑的那批不需要卡
+## 主机检查
 
 ```bash
 pip install -e ".[dev]"
-python tools/check_layering.py     # 分层门禁（纯标准库，不用 pytest）
-pytest                             # 默认只跑不依赖真卡的用例
+pytest
+python tools/check_layering.py
+pytest tests/interfaces -q
 ```
 
-`pyproject.toml` 里 `addopts = "-m 'not realcard'"`，所以直接 `pytest` 会把真卡用例
-**deselect 掉**（输出里会写 deselected 几条，那是正常的，不是跳过掩盖问题）。
+默认 `addopts = "-m 'not realcard'"` 排除真卡标记。输出中的 deselected 不算通过；池本体与能力层可在无框架环境检查。
 
-## 真卡用例怎么跑
-
-标了 `@pytest.mark.realcard` 的用例必须在**带卡机器的宿主栈容器内**跑：
-
-```bash
-pytest -m realcard          # 只跑真卡那批
-pytest -m ""                # 两批都跑（宿主栈齐全时才有意义）
-```
-
-## 为什么要这么分（不是洁癖，是三条硬事实）
-
-1. **无卡成员跑不了真卡用例**。组里有人在没有国产卡的机器上改池本体，如果单测默认需要卡，
-   他们等于没有单测可跑 —— ADR-0014 §3.5 第 2 条点名要防的就是这个。
-2. **本包刻意零依赖**。`torch` / vLLM 由各芯片容器自带，四家的版本互不兼容，CI 里装不出一套
-   「正确」的。所以 CI 只验池本体与能力层（它们本来就不许碰框架），框架绑定那层的真实可用性
-   只能在带卡机器的栈内复验。
-3. **三套卸载栈同一环境只有一套能导入成功**。`flagmemory.tiering.offload.{npu,ppu,xpu}` 各绑
-   一个宿主栈版本，拿 CI 去 import 它们必然两套失败，失败的原因还和代码对不对无关。
-
-## 目录
-
-| 路径 | 测什么 | 要卡吗 |
+| 路径 | 覆盖 | 需要真卡 |
 |---|---|---|
-| `tests/caps/test_capabilities.py` | 能力枚举、四级分法、池的用法策略、三条不变量文本在位 | 否 |
-| `tests/caps/test_degradation.py` | 五条降级路径查表、默认实现路径、按声明算降级计划 | 否 |
-| `tests/caps/test_backend.py` | `DeviceBackend` 协议面与假后端：三键、流、事件、句柄记账 | 否 |
-| `tests/caps/test_query.py` | 能力查询入口 `has` / `require` / `report` 与 L0 齐备判读 | 否 |
-| `tests/tiering/test_alias_package.py` | 兼容别名包 `offload.*` 的懒加载与 `DeprecationWarning` | 否 |
-| `tests/tiering/test_offload_realcard.py` | 三套卸载栈在宿主栈内能真导入、connector 类能取到 | **是**（`realcard`） |
-| `tests/tools/test_check_layering.py` | 分层门禁脚本：干净树通过、违规样本非零退出 | 否 |
+| `tests/caps/` | 能力、统一后端协议与假后端 | 否 |
+| `tests/pool/` 中主机文件 | 分配/复用、档位、查询、回收屏障、当前租约访问、首次目标流就绪、关闭恢复与强托管 | 否 |
+| `tests/interfaces/` | 类型存根与实现签名一致 | 否 |
+| `tests/tiering/test_alias_package.py` | 旧包兼容别名与弃用警告 | 否 |
+| `tests/tools/` | 分层依赖门禁 | 否 |
+| `tests/tiering/test_offload_realcard.py` | 宿主栈内 connector 类导入 | 是，仅证明导入能力 |
+| `tests/pool/test_pool_realcard.py` | 旧 CUDA 兼容命名空间的测试草稿 | 是，**当前禁止作为首芯片入口直接运行** |
 
-每个文件里的用例按 **正常 / 边界 / 异常** 三类分节，节名写在注释里，类名也带上
-（`TestNormal` / `TestBoundary` / `TestError`），便于按判据点数。
+## 真卡入口限制
 
-## 不在这里的东西
+**不要运行整批 `pytest -m realcard` 或清空 marker 限制。** 旧池真卡文件缺当前适配器协议、旧租约查询/复用断言失效，并包含按空闲显存倍数进行超量申请的测试；它不是现行可用验收入口，也不能当作昇腾结果。默认排除该模块不代表它已适配。
 
-- **实测证据**（真模型跑出来的 json / 日志）不是单测，归 ADR-0014 §3.5 第 3 件改造处置，
-  本次不动 `reports/`。
-- **池的业务实现**（分级块池 + 流有序分配）是 11-28 的出口，本次只有能力层的协议与假后端，
-  所以这里没有池的功能用例 —— 池实现落地时同批补。
+首次昇腾验证需后续独立测试文件和显式路径，先审阅实际收集名单、资源上限、目标流就绪、池块公开访问及清理步骤；当前文档不宣称该适配器已实现或真卡已通过。仅复制旧文件的运行命令无法满足这些条件。主机假后端结果不证明厂商运行时和设备生命周期。
+
+## 取证与历史材料
+
+旧真卡文件的取证逻辑默认仅打印 JSON；`FLAGMEMORY_REALCARD_EVIDENCE` 非空时才按给定路径写入。该旧逻辑不会自动拦截仓内路径，使用者须显式指定仓外位置，不得覆盖已有证据。此说明不是执行旧文件的许可。
+
+探针脚本随包分发，按各目录说明以脚本调用，不作为稳定模块 API。`reports/` 仍含历史数据，证据迁移未收口；本次文档工作不迁、不删、不改历史材料。三栈卸载证据与池首次芯片运行证据分别核对。

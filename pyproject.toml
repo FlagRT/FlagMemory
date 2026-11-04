@@ -18,7 +18,7 @@ dev = ["pytest>=8", "mypy>=1.8"]
 [tool.setuptools.packages.find]
 # import 路径是 flagmemory.*；offload.* 是兼容别名包，0.2.x 有效、0.3.0 移除，
 # 存在的理由是容器里写死的 vLLM kv_connector_module_path 字符串不必跟着改。
-# flagmemory/profiling/probes/ 是脚本集（无 __init__.py）自动排除；
+# flagmemory/profiling/probes/ 是随包分发的脚本集，不作为稳定模块 API；
 # docs/ reports/ tests/ 在包外，不入 wheel。
 include = ["flagmemory*", "offload*"]
 
