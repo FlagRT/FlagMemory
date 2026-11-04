@@ -265,3 +265,47 @@ def test_staged_source_parent_cannot_shadow_vendor_or_hide_extra_directory(expor
     else:path.mkdir()
     digest=hashlib.sha256(file.read_bytes()).hexdigest()
     with pytest.raises(ValueError):case_module().load_manifest(file,digest)
+
+
+@pytest.fixture
+def real_namespace(tmp_path, monkeypatch):
+    root = tmp_path / 'frozen'
+    package = root / 'runtime'
+    (package / 'conformance').mkdir(parents=True)
+    (package / '__init__.py').write_text('')
+    spec = importlib.util.spec_from_file_location('runtime', package / '__init__.py')
+    parent = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, 'runtime', parent)
+    monkeypatch.setitem(sys.modules, 'runtime.conformance', None)
+    sys.modules.pop('runtime.conformance')
+    namespace = importlib.import_module('runtime.conformance')
+    yield root, namespace
+    sys.modules.pop('runtime.conformance', None)
+
+
+def test_real_conformance_namespace_origin(real_namespace):
+    root, namespace = real_namespace
+    assert namespace.__file__ is None
+    origins = case_module().verify_runtime_origins(root)
+    assert origins['runtime.conformance'] == {
+        'kind': 'namespace', 'path': str((root/'runtime/conformance').resolve())}
+
+
+@pytest.mark.parametrize('fault', ['external', 'mixed', 'empty', 'spec_path',
+    'name', 'origin', 'loader', 'module_loader', 'missing_spec', 'ordinary', 'unknown'])
+def test_namespace_origin_rejects_pollution(real_namespace, monkeypatch, fault):
+    root, namespace = real_namespace
+    target = str((root/'runtime/conformance').resolve())
+    if fault == 'external': namespace.__path__ = ['/foreign/conformance']
+    if fault == 'mixed': namespace.__path__ = [target, '/foreign/conformance']
+    if fault == 'empty': namespace.__path__ = []
+    if fault == 'spec_path': namespace.__spec__.submodule_search_locations = ['/foreign']
+    if fault == 'name': namespace.__spec__.name = 'other'
+    if fault == 'origin': namespace.__spec__.origin = 'forged.py'
+    if fault == 'loader': namespace.__spec__.loader = object()
+    if fault == 'module_loader': namespace.__loader__ = object()
+    if fault == 'missing_spec': namespace.__spec__ = None
+    if fault == 'ordinary': namespace.__file__ = target + '/fake.py'
+    if fault == 'unknown':
+        monkeypatch.setitem(sys.modules, 'runtime.unknown', SimpleNamespace(__file__=None))
+    with pytest.raises(ValueError): case_module().verify_runtime_origins(root)

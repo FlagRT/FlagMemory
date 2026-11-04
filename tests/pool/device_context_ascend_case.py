@@ -5,6 +5,7 @@ Importing this module never imports the device runtime or a vendor framework.
 from __future__ import annotations
 import hashlib
 import importlib
+import importlib.machinery
 import json
 import logging
 from pathlib import Path, PurePosixPath
@@ -82,6 +83,26 @@ def verify_runtime_origins(root):
     for name, module in tuple(sys.modules.items()):
         if name == 'runtime' or name.startswith('runtime.') or name in _DYNAMIC:
             file=getattr(module,'__file__',None)
+            if name == 'runtime.conformance':
+                # The frozen public tree intentionally uses a PEP 420 namespace.
+                # Accept only this exact namespace, with one frozen search root.
+                spec = getattr(module, '__spec__', None)
+                loader = getattr(spec, 'loader', None)
+                namespace_type = getattr(importlib.machinery, 'NamespaceLoader', ())
+                expected = package/'conformance'
+                try:
+                    paths = tuple(Path(p).resolve() for p in module.__path__)
+                    spec_paths = tuple(Path(p).resolve() for p in spec.submodule_search_locations)
+                except (AttributeError, TypeError, ValueError, OSError):
+                    raise ValueError('unverifiable runtime namespace: '+name) from None
+                if (file is not None or spec.name != name or spec.origin is not None
+                    or not isinstance(loader, namespace_type)
+                    or getattr(module, '__loader__', None) is not loader
+                    or paths != (expected,) or spec_paths != (expected,)
+                    or not expected.is_dir()):
+                    raise ValueError('foreign runtime namespace: '+name)
+                origins[name] = {'kind': 'namespace', 'path': str(expected)}
+                continue
             if not file: raise ValueError('runtime module has no verifiable origin: '+name)
             file=Path(file).resolve()
             expected=package/'conformance'/(name+'.py') if name in _DYNAMIC else None
