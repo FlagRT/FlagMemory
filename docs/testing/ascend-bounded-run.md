@@ -56,7 +56,10 @@ output after deducting its byte budget, so the file cannot overshoot the limit.
 
 Use an independent frozen source directory without Git metadata or symlinks.
 Keep it and the new evidence directory outside shared checkouts and disjoint.
-The source digest is source_digest(source_dir) in the executor.
+The source digest is source_digest(source_dir) in the executor. Files are ordered
+by their relative POSIX path strings using case-sensitive comparison, independent
+of platform Path ordering and the physical parent directory. Each record contains
+a UTF-8 relative path, NUL, then the raw SHA256 of the file bytes.
 
 Preflight JSON fields are:
 

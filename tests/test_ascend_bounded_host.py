@@ -367,3 +367,17 @@ def test_unknown_device_appearing_before_start_refuses_and_cleans_own_container(
     result=runner.run_stage(**valid_run,docker=docker,clock=docker.clock)
     assert result["status"]=="refused" and not started
     assert docker.removed_ids==[CID] and result["cleanup"]["removed"]
+
+
+def test_source_digest_uses_case_sensitive_relative_posix_order_across_parent_paths(tmp_path):
+    # Fixed serialized order is Z.txt, a.txt, a/b.txt, independent of Path comparison.
+    records=[("Z.txt",b"upper\n"),("a.txt",b"lower\n"),("a/b.txt",b"nested\n")]
+    roots=[tmp_path/"parent-one"/"Checkout",tmp_path/"different"/"deep-parent"/"Source"]
+    for root,entries in zip(roots,(records,list(reversed(records)))):
+        for relative,content in entries:
+            path=root/relative
+            path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_bytes(content)
+    # Independently fixed from UTF-8 relative name + NUL + raw SHA256(content) records.
+    expected="2b01815d6312cb15f7cdb0cec90fce46ef640c7d9225c5fe7e9e0f1cf5e7ff02"
+    assert [runner.source_digest(root) for root in roots]==[expected,expected]

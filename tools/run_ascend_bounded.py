@@ -42,7 +42,7 @@ def source_digest(path):
     if not root.is_dir() or (root/".git").exists():
         raise Refused("source must be an independent frozen directory without .git")
     h=hashlib.sha256()
-    for file in sorted(root.rglob("*")):
+    for file in sorted(root.rglob("*"), key=lambda file:file.relative_to(root).as_posix()):
         if file.is_symlink(): raise Refused("source symlinks are not allowed")
         if file.is_file() and not any(part in ("__pycache__",".pytest_cache") for part in file.parts):
             h.update(file.relative_to(root).as_posix().encode()); h.update(b"\0")
