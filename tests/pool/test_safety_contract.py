@@ -233,6 +233,7 @@ def test_close_pending_survives_drop_and_recovers(wait):
     report = pool.destroy_pool(wait_for_drain=wait, timeout_s=0)
     assert not pool.destroyed
     assert len(report.pending) == 1 and not report.completed
+    assert (report.returned_blocks, report.returned_bytes) == (0, 0)
     custody_id = report.custody_id
     del pool
     gc.collect()
@@ -495,3 +496,134 @@ def test_first_target_consumption_rejects_broken_readiness_adapters(mode):
     # The same first consumer operation must reject an adapter that only accepts stream.
     with pytest.raises(FirstUseNotReady, match="no target-stream readiness"):
         consume_first_target_allocation(mode)
+
+
+@pytest.mark.parametrize("purpose,threshold", [
+    (None, None),
+    (Purpose.ACTIVATION, 0),
+    (Purpose.ACTIVATION, None),
+], ids=["default-purpose", "zero-retention", "reusable-control"])
+def test_destroy_report_counts_every_successful_release(purpose, threshold):
+    backend, allocator = AsyncBackend(), Allocator()
+    pool = create_pool(backend, form=PoolForm.TENSOR, base_allocator=allocator,
+                       tier_spec=TierSpec(16, 16, 2),
+                       reuse=pool_module.ReusePolicy(release_threshold_bytes=threshold))
+    lease = pool.alloc_on_stream(16, **({} if purpose is None else {"purpose": purpose}))
+    pool.free_block(lease.block_id)
+    backend.complete()
+    report = pool.destroy_pool(timeout_s=0)
+    assert report.completed
+    assert allocator.releases == 1
+    assert (report.returned_blocks, report.returned_bytes) == (1, 16)
+
+
+def test_destroy_report_combines_direct_and_retained_mixed_tiers():
+    backend, allocator = AsyncBackend(), Allocator()
+    pool = create_pool(backend, form=PoolForm.TENSOR, base_allocator=allocator,
+                       tier_spec=TierSpec(16, 16, 3),
+                       reuse=pool_module.ReusePolicy(release_threshold_bytes=16))
+    leases = [pool.alloc_on_stream(16),
+              pool.alloc_on_stream(16, purpose=Purpose.ACTIVATION),
+              pool.alloc_on_stream(32, purpose=Purpose.SCRATCH)]
+    for lease in leases:
+        pool.free_block(lease.block_id)
+    backend.complete()
+    report = pool.destroy_pool(timeout_s=0)
+    assert report.completed
+    assert allocator.releases == 3
+    assert (report.returned_blocks, report.returned_bytes) == (3, 64)
+
+
+def test_destroy_report_excludes_releases_before_call():
+    pool, backend, allocator = make_pool()
+    earlier = pool.alloc_on_stream(16)
+    current = allocate(pool)
+    pool.free_block(earlier.block_id)
+    backend.complete()
+    pool.drain_stream(timeout_s=0)
+    assert allocator.releases == 1
+    pool.free_block(current.block_id)
+    backend.complete()
+    report = pool.destroy_pool(timeout_s=0)
+    assert report.completed and allocator.releases == 2
+    assert (report.returned_blocks, report.returned_bytes) == (1, 16)
+
+
+@pytest.mark.parametrize("live", [False, True], ids=["pending", "live-lease"])
+def test_destroy_report_counts_only_this_call_on_retry(live):
+    pool, backend, allocator = make_pool()
+    ready = pool.alloc_on_stream(16)
+    later = pool.alloc_on_stream(32, purpose=Purpose.ACTIVATION)
+    pool.free_block(ready.block_id)
+    backend.complete()
+    if live:
+        with pytest.raises(LeakDetected) as exc:
+            pool.destroy_pool(timeout_s=0)
+        report = exc.value.report
+        assert len(report.leaked) == 1
+    else:
+        pool.free_block(later.block_id)
+        report = pool.destroy_pool(timeout_s=0)
+        assert len(report.pending) == 1
+    assert not report.completed and allocator.releases == 1
+    assert (report.returned_blocks, report.returned_bytes) == (1, 16)
+    if live:
+        pool.free_block(later.block_id)
+    backend.complete()
+    report = pool.destroy_pool(timeout_s=0)
+    assert report.completed and allocator.releases == 2
+    assert (report.returned_blocks, report.returned_bytes) == (1, 32)
+
+
+@pytest.mark.parametrize("purpose", [Purpose.UNDECLARED, Purpose.ACTIVATION])
+def test_destroy_report_never_counts_failed_release_or_retries_it(purpose):
+    pool, backend, allocator = make_pool()
+    lease = pool.alloc_on_stream(16, purpose=purpose)
+    pool.free_block(lease.block_id)
+    backend.complete()
+    allocator.fail_release = True
+    with pytest.raises(PoolError, match="release side effect then failure"):
+        pool.destroy_pool(timeout_s=0)
+    for _ in range(2):
+        report = pool.destroy_pool(timeout_s=0)
+        assert not report.completed and len(report.quarantined) == 1
+        assert (report.returned_blocks, report.returned_bytes) == (0, 0)
+        assert allocator.releases == 1
+        assert allocator.refs[0]() is not None
+
+
+def test_destroy_report_excludes_success_from_call_interrupted_by_release_error():
+    class FailSecondRelease(Allocator):
+        def release(self, resource):
+            self.fail_release = self.releases == 1
+            super().release(resource)
+
+    backend, allocator = AsyncBackend(), FailSecondRelease()
+    pool = create_pool(backend, form=PoolForm.TENSOR, base_allocator=allocator,
+                       tier_spec=TierSpec(16, 16, 3))
+    leases = [pool.alloc_on_stream(size) for size in (16, 32, 48)]
+    for lease in leases:
+        pool.free_block(lease.block_id)
+    backend.complete()
+    with pytest.raises(PoolError, match="release side effect then failure"):
+        pool.destroy_pool(timeout_s=0)
+    assert allocator.releases == 2
+    report = pool.destroy_pool(timeout_s=0)
+    assert len(report.quarantined) == 1 and not report.completed
+    # The 48-byte request occupies the 64-byte tier.
+    assert (report.returned_blocks, report.returned_bytes) == (1, 64)
+    assert allocator.releases == 3
+    report = pool.destroy_pool(timeout_s=0)
+    assert (report.returned_blocks, report.returned_bytes) == (0, 0)
+    assert allocator.releases == 3
+
+
+def test_destroy_report_does_not_count_event_quarantine():
+    pool, backend, allocator = make_pool()
+    lease = pool.alloc_on_stream(16)
+    pool.free_block(lease.block_id)
+    backend.fault = True
+    report = pool.destroy_pool(timeout_s=0)
+    assert len(report.quarantined) == 1 and not report.completed
+    assert (report.returned_blocks, report.returned_bytes) == (0, 0)
+    assert allocator.releases == 0 and allocator.refs[0]() is not None

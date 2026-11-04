@@ -169,6 +169,8 @@ class BlockPool:
         self._barrier = RecycleBarrier(
             backend, device_index=device_index, timeout_s=barrier_timeout_s
         )
+        self._returned_bytes = 0
+        self._returned_blocks = 0
         self._destroyed = False
         self._closing = False
         self._custody_id = next(_CUSTODY_IDS)
@@ -218,16 +220,16 @@ class BlockPool:
         """
         self._require_alive()
         budget = self._barrier.budget(timeout_s)
+        # Include successful releases inside drain as well as its retained blocks.
+        returned_bytes_before = self._returned_bytes
+        returned_blocks_before = self._returned_blocks
         self._closing = True
         self._retain()
         timed_out = False
         if wait_for_drain:
             timed_out = self.drain_stream(timeout_s=budget).recoverable_timeout
-        returned_bytes = 0
-        returned_blocks = 0
         for block in self._ledger.by_state(BlockState.REUSABLE):
-            returned_bytes += self._return_to_base(block)
-            returned_blocks += 1
+            self._return_to_base(block)
         leaked = tuple(b.view() for b in self._ledger.by_state(BlockState.IN_USE))
         pending = tuple(b.view() for b in self._ledger.by_state(BlockState.PENDING_RECYCLE))
         completed = len(self._ledger) == 0
@@ -236,7 +238,8 @@ class BlockPool:
             self._destroyed = True
             _CUSTODIED_POOLS.pop(self._custody_id, None)
         report = DestroyReport(
-            returned_bytes=returned_bytes, returned_blocks=returned_blocks,
+            returned_bytes=self._returned_bytes - returned_bytes_before,
+            returned_blocks=self._returned_blocks - returned_blocks_before,
             quarantined=self._ledger.quarantined_views(), leaked=leaked,
             drain_timed_out=timed_out, pending=pending, closing=not completed,
             completed=completed, custody_id=None if completed else self._custody_id,
@@ -872,6 +875,8 @@ class BlockPool:
                 f"块 {block.block_id} 交回底座时报错，已转隔离：{exc!r}"
             ) from exc
         self._ledger.retire(block)
+        self._returned_bytes += nbytes
+        self._returned_blocks += 1
         return nbytes
 
 
