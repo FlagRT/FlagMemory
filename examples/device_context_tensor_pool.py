@@ -10,6 +10,18 @@ from flagmemory.pool.base import BaseAllocator
 from flagmemory.adapters.device_context import DeviceContextBridge
 
 
+class CleanupFailures(Exception):
+    """Structured cleanup outcomes attached as the primary exception's cause."""
+
+    def __init__(self, free_error: BaseException | None,
+                 destroy_error: BaseException | None,
+                 destroy_report: DestroyReport | None) -> None:
+        super().__init__('cleanup failed or report could not be attached')
+        self.free_error = free_error
+        self.destroy_error = destroy_error
+        self.destroy_report = destroy_report
+
+
 def consume_once(bridge: DeviceContextBridge, allocator: BaseAllocator, *,
                  tier_spec: TierSpec, nbytes: int,
                  consume: Callable[[Any], None], device_index: int = 0) -> DestroyReport:
@@ -29,31 +41,28 @@ def consume_once(bridge: DeviceContextBridge, allocator: BaseAllocator, *,
             del ref
     except BaseException as exc:
         error = exc
-    cleanup_error = None
+    free_error = None
+    destroy_error = None
     if lease is not None:
         try:
             pool.free_block(lease.block_id)
         except BaseException as exc:
-            cleanup_error = exc
+            free_error = exc
     try:
         report = pool.destroy_pool(timeout_s=0)
     except BaseException as exc:
+        destroy_error = exc
         report = getattr(exc, "report", None)
-        if cleanup_error is None:
-            cleanup_error = exc
-    if error is not None:
+    primary = error if error is not None else (free_error if free_error is not None else destroy_error)
+    if primary is not None:
+        report_attached = False
         if report is not None:
             try:
-                error.destroy_report = report
+                primary.destroy_report = report
+                report_attached = True
             except (AttributeError, TypeError):
-                wrapper = RuntimeError("consumer failed; cleanup report attached")
-                wrapper.destroy_report = report
-                raise wrapper from error
-        if cleanup_error is not None:
-            raise error from cleanup_error
-        raise error
-    if cleanup_error is not None:
-        if report is not None:
-            cleanup_error.destroy_report = report
-        raise cleanup_error
+                pass
+        if free_error is not None or destroy_error is not None or (report is not None and not report_attached):
+            raise primary from CleanupFailures(free_error, destroy_error, report)
+        raise primary
     return report

@@ -199,3 +199,55 @@ def test_consumer_runs_inside_registered_stream_context():
         seen.append(tensor[0])
     report = consume_once(p.bridge, p.allocator, tier_spec=TierSpec(64,64,1), nbytes=10, consume=consume, device_index=2)
     assert seen == [33] and not report.completed and not b.active
+
+def test_consumer_and_both_cleanup_failures_remain_observable(monkeypatch):
+    import examples.device_context_tensor_pool as example
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    consumer = RuntimeError('consumer failed')
+    free = RuntimeError('free failed')
+    destroy = RuntimeError('destroy failed')
+    class Pool:
+        def alloc_on_stream(self, *a, **kw): return SimpleNamespace(block_id=1)
+        def access_block(self, *a): return bytearray(1)
+        def free_block(self, *a): raise free
+        def destroy_pool(self, **kw): raise destroy
+    monkeypatch.setattr(example, 'create_pool', lambda *a, **kw: Pool())
+    stream = SimpleNamespace(context=nullcontext)
+    bridge = SimpleNamespace(current_stream=lambda index: stream, validate_stream_device=lambda stream, index: None)
+    def consume(_): raise consumer
+    with pytest.raises(RuntimeError) as caught:
+        example.consume_once(bridge, None, tier_spec=None, nbytes=1, consume=consume)
+    assert caught.value is consumer
+    cleanup = caught.value.__cause__
+    assert cleanup.free_error is free
+    assert cleanup.destroy_error is destroy
+    assert cleanup.destroy_report is None
+
+@pytest.mark.parametrize('consumer_fails', [True, False])
+def test_cleanup_failure_keeps_report_and_all_error_objects(monkeypatch, consumer_fails):
+    import examples.device_context_tensor_pool as example
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    class FalseError(Exception):
+        def __bool__(self): return False
+    consumer = FalseError('consumer')
+    free = RuntimeError('free'); destroy = RuntimeError('destroy'); report = object()
+    destroy.report = report
+    class Pool:
+        def alloc_on_stream(self, *a, **kw): return SimpleNamespace(block_id=1)
+        def access_block(self, *a): return bytearray(1)
+        def free_block(self, *a): raise free
+        def destroy_pool(self, **kw): raise destroy
+    monkeypatch.setattr(example, 'create_pool', lambda *a, **kw: Pool())
+    stream = SimpleNamespace(context=nullcontext)
+    bridge = SimpleNamespace(current_stream=lambda index: stream, validate_stream_device=lambda stream, index: None)
+    def consume(_):
+        if consumer_fails: raise consumer
+    with pytest.raises(Exception) as caught:
+        example.consume_once(bridge, None, tier_spec=None, nbytes=1, consume=consume)
+    assert caught.value is (consumer if consumer_fails else free)
+    assert caught.value.destroy_report is report
+    assert caught.value.__cause__.free_error is free
+    assert caught.value.__cause__.destroy_error is destroy
+    assert caught.value.__cause__.destroy_report is report
