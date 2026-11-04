@@ -250,3 +250,27 @@ def test_metadata_output_preserves_reviewable_relevant_excerpts(tmp_path,monkeyp
     result=probe.collect_abi_evidence([str(header)],str(library),str(tmp_path/"output"))
     assert "typedef int aclError" in result["header_excerpts"][str(header.resolve())]
     assert result["symbol_lines"]==["1 0 1 FUNC GLOBAL DEFAULT 1 aclInit"]
+
+
+def test_symbol_output_limit_caps_actual_retained_tempfile_bytes(monkeypatch):
+    import os
+    import tempfile
+    original=tempfile.TemporaryFile
+    sizes=[]
+    class ObservedFile:
+        def __init__(self):self.raw=original()
+        def __getattr__(self,name):return getattr(self.raw,name)
+        def __enter__(self):return self
+        def __exit__(self,*args):
+            sizes.append(os.fstat(self.raw.fileno()).st_size)
+            self.raw.close()
+    monkeypatch.setattr(tempfile,"TemporaryFile",ObservedFile)
+    with pytest.raises(probe.ProbeRefused):
+        probe.bounded_symbols([sys.executable,"-c","import os; os.write(1,b'x'*(16<<20))"],timeout_s=3,limit=1024)
+    assert sizes and max(sizes)<=1024
+
+
+def test_symbol_capture_keeps_exact_limit_and_nonzero_exit_semantics():
+    assert probe.bounded_symbols([sys.executable,"-c","import os; os.write(1,b'x'*1024)"],limit=1024,timeout_s=3)=="x"*1024
+    with pytest.raises(probe.ProbeRefused,match="reader failed"):
+        probe.bounded_symbols([sys.executable,"-c","raise SystemExit(7)"],limit=1024,timeout_s=3)

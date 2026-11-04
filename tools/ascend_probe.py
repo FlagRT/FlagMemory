@@ -85,29 +85,17 @@ def check_hashes(files):
             raise ProbeRefused("evidence file hash mismatch: " + str(path))
 
 def bounded_symbols(argv, timeout_s=30, limit=MAX_STATIC):
-    # Spool to a temporary file: never buffer arbitrary tool output in RAM.
-    with tempfile.TemporaryFile() as output:
-        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=output,
-                                   stderr=subprocess.STDOUT, shell=False)
-        started = time.monotonic()
-        try:
-            while process.poll() is None:
-                if output.tell() > limit:
-                    raise ProbeRefused("symbol output limit")
-                if time.monotonic() - started >= timeout_s:
-                    raise ProbeRefused("symbol collection deadline")
-                time.sleep(0.01)
-            if output.tell() > limit:
-                raise ProbeRefused("symbol output limit")
-            output.seek(0)
-            result = output.read(limit + 1)
-            if process.returncode != 0:
-                raise ProbeRefused("symbol reader failed")
-            return result.decode("utf-8", errors="replace")
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=2)
+    # The shared reader uses a bounded pipe queue and checks before every disk write.
+    from tools.run_ascend_bounded import OutputLimit, capture_bounded
+    try:
+        code, result = capture_bounded(argv, timeout_s=timeout_s, limit=limit)
+    except OutputLimit as exc:
+        raise ProbeRefused("symbol output limit") from exc
+    except TimeoutError as exc:
+        raise ProbeRefused("symbol collection deadline") from exc
+    if code != 0:
+        raise ProbeRefused("symbol reader failed")
+    return result.decode("utf-8", errors="replace")
 
 def collect_abi_evidence(header_paths, library_path, output_dir):
     library = absolute_file(library_path)

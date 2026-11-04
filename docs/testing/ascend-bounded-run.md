@@ -33,7 +33,8 @@ automatic retry or automatic next stage is provided.
 - test_completed_reuse_rejects_old_lease
 - test_pending_borrower_protection_when_observed
 
-A skipped pending observation is uncovered. Missing cases, nonzero child exit,
+A skipped pending observation is uncovered; the host retains executed/skipped
+counts and does not produce passed stage evidence. Missing cases, nonzero child exit,
 mismatched evidence or cleanup failure cannot pass. The legacy CUDA file and
 broad real-card selection are excluded.
 
@@ -47,7 +48,9 @@ The host terminates only its attached CLI and verified full container ID. It
 rechecks ownership, bounds stop/remove calls, confirms absence, queries Docker
 and records the target postcheck. Unconfirmed cleanup remains a failure. No
 prefix/name cleanup or automatic reset is provided. Output and evidence total
-at most 100 MiB; control commands and streamed output are independently bounded.
+at most 100 MiB; control commands and streamed output are independently bounded. Control and symbol
+subprocesses write to a bounded pipe; only the parent writes retained temporary
+output after deducting its byte budget, so the file cannot overshoot the limit.
 
 ## Preflight and input bundle
 
@@ -69,7 +72,9 @@ Preflight JSON fields are:
 | metadata | Metadata only: explicit absolute target-image headers list and library path |
 
 Before create/start, the executor refreshes actual container authorization and
-target device facts. Raw tables are retained. Unrelated devices, timestamps,
+target device facts. Directory, alias and unknown device authorization paths
+in another container are refused rather than treated as an empty safe set.
+Raw tables are retained. Unrelated devices, timestamps,
 temperature and power changes do not reject the target. Target identity/health,
 new target PIDs, nonzero target compute utilization or HBM beyond the reviewed
 tolerance stop progression. Unknown table formats are refused. The postcheck

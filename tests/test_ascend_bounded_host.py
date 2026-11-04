@@ -273,3 +273,97 @@ def test_target_changes_or_unknown_shape_are_refused(change):
     if change=="malformed":sample=sample.replace("HBM-Usage(MB)","unknown format")
     with pytest.raises(runner.Refused):
         runner.compare_target_snapshot(FACTS,runner.parse_target_snapshot(sample),tolerance_mb=128)
+
+
+@pytest.mark.parametrize("device_path", ["/dev", "/dev/", "/dev/davinci", "/dev/davinci15-alias", "/unknown/device"])
+def test_unknown_or_directory_device_authorization_is_not_an_empty_safe_set(device_path,valid_run):
+    docker=FakeDocker("nonoverlap")
+    docker.source_dir=valid_run["source_dir"];docker.input_dir=str(Path(valid_run["run_dir"])/"input")
+    original=docker.call
+    def call(argv,timeout_s):
+        code,out,err=original(argv,timeout_s)
+        if argv[:2]==["docker","inspect"] and argv[-1]=="b"*64:
+            item=json.loads(out)[0]
+            item["HostConfig"]["Devices"]=[{"PathOnHost":device_path}]
+            return code,json.dumps([item]),err
+        return code,out,err
+    docker.call=call
+    result=runner.run_stage(**valid_run,docker=docker,clock=docker.clock)
+    assert result["status"]=="refused"
+    assert not any(argv[1]=="create" for argv in docker.calls)
+    assert docker.current is None
+
+def test_other_chip_valid_process_does_not_hide_unknown_target_process_row():
+    sample=SAMPLE.replace("| No running processes found in NPU 7 |",
+        "| 7 0 | 8888 | worker | 500 | NA |\n| 7 1 unknown | 9999 | worker | 800 | NA |")
+    with pytest.raises(runner.Refused):
+        runner.compare_target_snapshot(FACTS,runner.parse_target_snapshot(sample),tolerance_mb=128)
+
+def test_control_output_limit_caps_actual_retained_tempfile_bytes(monkeypatch):
+    import os
+    import tempfile
+    original=tempfile.TemporaryFile
+    sizes=[]
+    class ObservedFile:
+        def __init__(self):self.raw=original()
+        def __getattr__(self,name):return getattr(self.raw,name)
+        def __enter__(self):return self
+        def __exit__(self,*args):
+            sizes.append(os.fstat(self.raw.fileno()).st_size)
+            self.raw.close()
+    monkeypatch.setattr(tempfile,"TemporaryFile",ObservedFile)
+    monkeypatch.setattr(runner,"CONTROL_LIMIT",1024)
+    with pytest.raises(runner.Refused):
+        runner.LocalDocker().call([sys.executable,"-c","import os; os.write(1,b'x'*(16<<20))"],timeout_s=3)
+    assert sizes and max(sizes)<=1024
+
+@pytest.mark.parametrize("failure", [None,"nonzero","cleanup"])
+def test_lifecycle_uncovered_preserves_counts_without_passed_evidence(valid_run,failure):
+    valid_run["stage"]="lifecycle"
+    path=Path(valid_run["preflight_path"]);data=json.loads(path.read_text())
+    common={"status":"passed","image_id":runner.IMAGE_ID,"source_sha256":data["source_sha256"],"run_id":"prior"}
+    mapping=path.parent/"mapping.json"
+    mapping.write_text(json.dumps(dict(common,stage="mapping",user_device=0,logical_device=0,physical_device=15)))
+    health=path.parent/"health.json";health.write_text(json.dumps(dict(common,stage="health")))
+    runtime=path.parent/"runtime.json";runtime.write_text("{}")
+    data["inputs"]={"mapping.json":str(mapping),"runtime.json":str(runtime),"health.json":str(health)}
+    path.write_text(json.dumps(data))
+    docker=FakeDocker("rm_timeout" if failure=="cleanup" else None)
+    docker.source_dir=valid_run["source_dir"];docker.input_dir=str(Path(valid_run["run_dir"])/"input")
+    class LifecycleProcess:
+        sent=False
+        def read(self,max_bytes,timeout_s):
+            if self.sent:return b""
+            self.sent=True
+            return json.dumps({"schema":1,"stage":"lifecycle","status":"uncovered","image_id":runner.IMAGE_ID,
+                "run_id":docker.run_id,"source_sha256":docker.source_sha,"executed":3,"skipped":1}).encode()+b"\n"
+        def poll(self):return (1 if failure=="nonzero" else 0) if self.sent else None
+        def terminate(self,timeout_s):pass
+    docker.start_attached=lambda cid:LifecycleProcess()
+    result=runner.run_stage(**valid_run,docker=docker,clock=docker.clock)
+    if failure is None:
+        assert result["status"]=="uncovered" and result["exit_code"]==0
+        assert result["probe"]["executed"]==3 and result["probe"]["skipped"]==1
+    else:assert result["status"]=="failed"
+    assert not (Path(valid_run["run_dir"])/"stage-evidence.json").exists()
+
+
+def test_unknown_device_appearing_before_start_refuses_and_cleans_own_container(valid_run):
+    docker=FakeDocker("nonoverlap")
+    docker.source_dir=valid_run["source_dir"];docker.input_dir=str(Path(valid_run["run_dir"])/"input")
+    original=docker.call
+    inventories=0;started=[]
+    def call(argv,timeout_s):
+        nonlocal inventories
+        code,out,err=original(argv,timeout_s)
+        if argv[:2]==["docker","inspect"] and argv[-1]=="b"*64:
+            inventories+=1
+            if inventories==2:
+                item=json.loads(out)[0];item["HostConfig"]["Devices"]=[{"PathOnHost":"/dev"}]
+                return code,json.dumps([item]),err
+        return code,out,err
+    docker.call=call
+    docker.start_attached=lambda cid:started.append(cid)
+    result=runner.run_stage(**valid_run,docker=docker,clock=docker.clock)
+    assert result["status"]=="refused" and not started
+    assert docker.removed_ids==[CID] and result["cleanup"]["removed"]

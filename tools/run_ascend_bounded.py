@@ -124,26 +124,41 @@ class Attached:
         self.process.stdout.close()
         self.thread.join(timeout=min(.2,timeout_s))
 
+class OutputLimit(RuntimeError): pass
+
+def capture_bounded(argv,*,timeout_s,limit):
+    """Backpressure the child and cap every parent write, including temporary output."""
+    deadline=time.monotonic()+timeout_s
+    with tempfile.TemporaryFile() as output:
+        process=subprocess.Popen(argv,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT,shell=False,bufsize=0)
+        attached=Attached(process)
+        captured=0
+        try:
+            while True:
+                remaining=deadline-time.monotonic()
+                if remaining<=0:raise TimeoutError("control command deadline")
+                block=attached.read(65536,timeout_s=min(.1,remaining))
+                available=limit-captured
+                if block:
+                    kept=block[:available]
+                    output.write(kept)
+                    captured+=len(kept)
+                    if len(block)>available:raise OutputLimit("output limit")
+                code=attached.poll()
+                if code is not None:break
+            output.seek(0)
+            return code,output.read(limit)
+        finally:
+            attached.terminate(timeout_s=min(2,max(.1,timeout_s)))
+
 class LocalDocker:
     def call(self,argv,timeout_s):
-        # Control commands are also bounded. Spooling avoids unbounded communicate().
-        with tempfile.TemporaryFile() as stream:
-            proc=subprocess.Popen(argv,stdin=subprocess.DEVNULL,stdout=stream,
-                                  stderr=subprocess.STDOUT,shell=False)
-            end=time.monotonic()+timeout_s
-            try:
-                while proc.poll() is None:
-                    if stream.tell()>CONTROL_LIMIT:raise Refused("control output limit")
-                    if time.monotonic()>=end:raise TimeoutError("control command deadline")
-                    time.sleep(.01)
-                if stream.tell()>CONTROL_LIMIT:raise Refused("control output limit")
-                stream.seek(0); out=stream.read(CONTROL_LIMIT).decode("utf-8",errors="replace")
-                return proc.returncode,out,""
-            finally:
-                if proc.poll() is None:
-                    proc.kill()
-                    try:proc.wait(timeout=.2)
-                    except subprocess.TimeoutExpired:pass
+        try:
+            code,output=capture_bounded(argv,timeout_s=timeout_s,limit=CONTROL_LIMIT)
+        except OutputLimit as exc:
+            raise Refused("control output limit") from exc
+        return code,output.decode("utf-8",errors="replace"),""
     def start_attached(self,container_id):
         return Attached(subprocess.Popen(["docker","start","--attach",container_id],
                         stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
@@ -187,6 +202,9 @@ def parse_target_snapshot(text):
         if not line.strip().startswith("|"):continue
         cells=[part.strip() for part in line.strip().strip("|").split("|")]
         words=cells[0].split()
+        if (words and words[0]==str(result["npu"])
+            and not (len(words)==2 and all(word.isdigit() for word in words))):
+            raise Refused("unrecognized target NPU process row")
         if len(words)==2 and all(word.isdigit() for word in words):
             npu,chip=map(int,words)
             if len(cells)!=5 or not cells[1].isdigit() or not cells[3].isdigit():
@@ -245,7 +263,19 @@ def no_conflicting_container(item,mode):
     if any(m.get("Source") in ("/","/dev") for m in item.get("Mounts",[])):
         raise Refused("another container has a broad host mount")
     devices=host.get("Devices") or []
-    computes=[d.get("PathOnHost","") for d in devices if re.fullmatch(r"/dev/davinci\d+",d.get("PathOnHost",""))]
+    if not isinstance(devices,list):
+        raise Refused("another container has unrecognized device authorization")
+    computes=[]
+    controls={"/dev/"+node for node in NODES[1:]}
+    for device in devices:
+        path=device.get("PathOnHost") if isinstance(device,dict) else None
+        if not isinstance(path,str):
+            raise Refused("another container has unrecognized device authorization")
+        if re.fullmatch(r"/dev/davinci(?:[0-9]|1[0-5])",path):
+            computes.append(path)
+        elif path not in controls:
+            # Docker can recursively authorize directories; unknown paths are not safe emptiness.
+            raise Refused("another container has directory, alias or unknown device authorization")
     if "/dev/davinci15" in computes or (mode=="exclusive" and computes):
         raise Refused("overlapping compute authorization or exclusive window conflict")
 
@@ -389,7 +419,8 @@ def run_stage(*,stage,run_dir,source_dir,image,preflight_path,docker,clock=time.
                 candidate=json.loads(line)
                 if isinstance(candidate,dict):payload=candidate;break
             except ValueError:pass
-        allowed_status=("uncovered",) if stage=="metadata" else ("passed",)
+        allowed_status=(("uncovered",) if stage=="metadata" else
+                        ("passed","uncovered") if stage=="lifecycle" else ("passed",))
         expected_stage="metadata" if stage=="metadata" else stage
         if (not payload or payload.get("status") not in allowed_status or payload.get("stage")!=expected_stage
             or payload.get("run_id")!=run_id or payload.get("image_id")!=image
