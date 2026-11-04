@@ -240,3 +240,93 @@ def test_copy_failure_returns_lease_to_caller(input_case, monkeypatch):
     with pytest.raises(InputLeaseError) as err:
         lease_input_ids(pool, runtime, ids, stream=stream, stream_id=3, device=2)
     assert err.value.lease.tensor is not None and not err.value.lease.return_attempted and pool.free_calls == 0
+
+
+def test_entry_cleanup_reuse_runs_in_inference_mode_and_records():
+    from test_onerec_inputs_ascend import _finish_pool
+    from pooled_model_inputs import lease_input_ids
+    pool, runtime, ids, stream = make_entry_case()
+    with runtime.inference_mode():
+        lease = lease_input_ids(pool, runtime, ids, stream=stream, stream_id=3, device=2)
+    record = {}
+    _finish_pool(lease, pool=pool, backend=FakeBackend(), runtime=runtime, ids=ids,
+                 stream=stream, sid=3, device=2, successful=True, record=record)
+    assert pool.free_calls == 2 and record['reuse']['storage_id'] == 1
+    assert record['destroy']['completed'] is True
+    assert all(x['free']['status'] == 'completed' and x['drain']['status'] == 'completed' for x in record['returns'])
+
+
+def test_entry_cleanup_second_copy_failure_is_primary_and_new_lease_returned():
+    from test_onerec_inputs_ascend import _finish_pool
+    from pooled_model_inputs import lease_input_ids, InputLeaseError
+    pool, runtime, ids, stream = make_entry_case(fail_second_copy=True)
+    with runtime.inference_mode():
+        lease = lease_input_ids(pool, runtime, ids, stream=stream, stream_id=3, device=2)
+    record = {}
+    with pytest.raises(InputLeaseError, match='construction'):
+        _finish_pool(lease, pool=pool, backend=FakeBackend(), runtime=runtime, ids=ids,
+                     stream=stream, sid=3, device=2, successful=True, record=record)
+    assert pool.free_calls == 2 and record['destroy']['completed'] is True
+    assert record['returns'][1]['block_id'] == 2
+
+
+def test_entry_cleanup_pending_and_destroy_error_preserve_primary_and_report():
+    from test_onerec_inputs_ascend import _finish_pool
+    from pooled_model_inputs import lease_input_ids
+    pool, runtime, ids, stream = make_entry_case(destroy_error=True)
+    with runtime.inference_mode():
+        lease = lease_input_ids(pool, runtime, ids, stream=stream, stream_id=3, device=2)
+    record = {}
+    with pytest.raises(TimeoutError):
+        _finish_pool(lease, pool=pool, backend=FakeBackend(done=False), runtime=runtime, ids=ids,
+                     stream=stream, sid=3, device=2, successful=False, record=record, timeout_s=0)
+    assert pool.free_calls == 0 and record['destroy']['leaked'] == [lease.block_id]
+    assert record['returns'][0]['completion']['status'] == 'failed'
+    assert 'destroy' in record['cleanup_errors']
+
+
+def make_entry_case(*, fail_second_copy=False, destroy_error=False):
+    from contextlib import contextmanager
+    pool = FakePool(); mode = {'active': False, 'copies': 0}
+    class ModeTensor(FakeTensor):
+        def narrow(self, dim, start, length):
+            return ModeTensor(buf=self.buf, shape=(length,), dtype=self.dtype, device=self.device.type, index=self.device.index, offset=self.offset+start)
+        def view(self, *args):
+            dtype = args[0] if len(args) == 1 and isinstance(args[0], str) else self.dtype
+            shape = (self.numel() // 8,) if dtype == 'int64' and self.dtype == 'uint8' else args
+            return ModeTensor(buf=self.buf, shape=shape, dtype=dtype, device=self.device.type, index=self.device.index, offset=self.offset)
+        def copy_(self, source, non_blocking=False):
+            if not mode['active']: raise RuntimeError('inference tensor cannot be written outside inference mode')
+            mode['copies'] += 1
+            if fail_second_copy and mode['copies'] == 2: raise RuntimeError('second copy failed')
+            super().copy_(source, non_blocking=non_blocking)
+    pool.base = ModeTensor(shape=(8192,), dtype='uint8', device='npu', index=2)
+    class DestroyError(RuntimeError):
+        def __init__(self): self.report = {'completed': False, 'leaked': [1]}; super().__init__('destroy failed')
+    def destroy_pool(**kwargs):
+        if destroy_error: raise DestroyError()
+        return {'completed': True, 'leaked': [], 'pending': [], 'quarantined': []}
+    pool.destroy_pool = destroy_pool
+    @contextmanager
+    def inference_mode():
+        old = mode['active']; mode['active'] = True
+        try: yield
+        finally: mode['active'] = old
+    runtime = SimpleNamespace(int64='int64', uint8='uint8', inference_mode=inference_mode,
+        npu=SimpleNamespace(device=lambda _: nullcontext(), stream=lambda _: nullcontext()))
+    return pool, runtime, FakeTensor([3, 9, 17]), SimpleNamespace(device=SimpleNamespace(type='npu', index=2))
+
+
+def test_entry_second_copy_and_destroy_error_keep_original_error():
+    from test_onerec_inputs_ascend import _finish_pool
+    from pooled_model_inputs import lease_input_ids, InputLeaseError
+    pool, runtime, ids, stream = make_entry_case(fail_second_copy=True, destroy_error=True)
+    with runtime.inference_mode():
+        lease = lease_input_ids(pool, runtime, ids, stream=stream, stream_id=3, device=2)
+    record = {}
+    with pytest.raises(InputLeaseError) as failure:
+        _finish_pool(lease, pool=pool, backend=FakeBackend(), runtime=runtime, ids=ids,
+                     stream=stream, sid=3, device=2, successful=True, record=record)
+    assert 'second copy failed' in repr(failure.value.__cause__)
+    assert record['destroy']['completed'] is False and 'destroy' in record['cleanup_errors']
+    assert pool.free_calls == 2

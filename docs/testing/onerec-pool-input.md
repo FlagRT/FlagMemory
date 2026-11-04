@@ -50,3 +50,12 @@ helper prohibits consumption or another return. Pool destruction reports any
 pending, quarantined or live blocks and keeps unsafe backing under pool custody.
 See the [test adapter](../../tests/pool/ascend_test_adapter.py) for its limited
 candidate backend capabilities.
+
+The `ONEREC_INPUT_EVIDENCE` JSON line records available input equality and
+digests, the embedding consumer, numerical comparison, completion and each
+return/drain, reuse, destroy report, allocator counts, and memory observations
+before model load, after forward, after each attempted return, and after destroy.
+Missing observations and cleanup errors are reported explicitly. A destroy
+report does not imply that allocator caches returned HBM to their prior level.
+The original model or construction error remains the primary failure when
+cleanup also fails.

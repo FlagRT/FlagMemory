@@ -91,16 +91,34 @@ def confirm_completion(backend, *, stream, timeout_s):
     return deadline
 
 
-def release_input_ids(lease, pool, backend, *, stream, timeout_s):
+def release_input_ids(lease, pool, backend, *, stream, timeout_s, evidence=None):
     if lease.closed or lease.return_attempted:
         raise ValueError('lease already returned or return outcome uncertain')
-    deadline = confirm_completion(backend, stream=stream, timeout_s=timeout_s)
+    evidence = evidence if evidence is not None else {}
+    evidence.update(completion={'status': 'not_attempted'}, free={'status': 'not_attempted'}, drain={'status': 'not_attempted'})
+    try:
+        deadline = confirm_completion(backend, stream=stream, timeout_s=timeout_s)
+    except Exception as exc:
+        evidence['completion'] = {'status': 'failed', 'error': repr(exc)}
+        raise
+    evidence['completion'] = {'status': 'confirmed'}
     lease.tensor = None
     lease.base = None
     lease.return_attempted = True
-    pool.free_block(lease.block_id)
+    evidence['free'] = {'status': 'attempted'}
+    try:
+        returned = pool.free_block(lease.block_id)
+    except Exception as exc:
+        evidence['free'] = {'status': 'failed_uncertain', 'error': repr(exc)}
+        raise
+    evidence['free'] = {'status': 'completed', 'block_id': lease.block_id, 'state': str(getattr(returned, 'state', 'unknown'))}
     remaining = max(0, deadline-time.monotonic())
-    result = pool.drain_stream(timeout_s=remaining)
+    try:
+        result = pool.drain_stream(timeout_s=remaining)
+    except Exception as exc:
+        evidence['drain'] = {'status': 'failed', 'error': repr(exc)}
+        raise
+    evidence['drain'] = {'status': 'completed' if not result.recoverable_timeout and not result.still_pending and not result.quarantined_blocks else 'incomplete', 'still_pending': result.still_pending, 'recoverable_timeout': result.recoverable_timeout, 'quarantined_blocks': list(result.quarantined_blocks), 'promoted_blocks': getattr(result, 'promoted_blocks', None), 'promoted_bytes': getattr(result, 'promoted_bytes', None)}
     if result.recoverable_timeout or result.still_pending or result.quarantined_blocks:
         raise RuntimeError('pool drain did not complete')
     lease.closed = True

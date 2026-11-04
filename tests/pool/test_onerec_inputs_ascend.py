@@ -134,6 +134,108 @@ def compare_forward(baseline, pooled, *, atol, rtol):
     return {'argmax': max(range(len(a)), key=a.__getitem__), 'max_abs_diff': max(differences)}
 
 
+def _plain(value):
+    from dataclasses import asdict, is_dataclass
+    from enum import Enum
+    if is_dataclass(value):
+        return _plain(asdict(value))
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, dict):
+        return {str(k): _plain(v) for k, v in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain(v) for v in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return repr(value)
+
+
+def _finish_pool(lease, *, pool, backend, runtime, ids, stream, sid, device,
+                 successful, record, timeout_s=10, clear_output=lambda: None, observe=lambda: None):
+    from pooled_model_inputs import InputLeaseError, lease_input_ids, release_input_ids, confirm_completion
+    record.setdefault('returns', [])
+    record.setdefault('cleanup_errors', {})
+    record.setdefault('reuse', {'status': 'not_attempted'})
+    record.setdefault('destroy', {'status': 'not_attempted'})
+    first_error = None
+
+    def finish_one(current):
+        item = {'block_id': current.block_id, 'pre_release_completion': {'status': 'not_attempted'}}
+        record['returns'].append(item)
+        try:
+            confirm_completion(backend, stream=stream, timeout_s=timeout_s)
+            item['pre_release_completion'] = {'status': 'confirmed'}
+            clear_output()
+            release_input_ids(current, pool, backend, stream=stream, timeout_s=timeout_s, evidence=item)
+        except Exception as exc:
+            if item['pre_release_completion']['status'] == 'not_attempted':
+                item['pre_release_completion'] = {'status': 'failed', 'error': repr(exc)}
+                item.update(completion={'status': 'failed', 'error': repr(exc)}, free={'status': 'not_attempted'}, drain={'status': 'not_attempted'})
+            raise
+        finally:
+            item['after_return_observation'] = observe()
+
+    try:
+        if lease is not None and not lease.closed and not lease.return_attempted:
+            finish_one(lease)
+            if successful:
+                previous = lease
+                try:
+                    with runtime.inference_mode():
+                        lease = lease_input_ids(pool, runtime, ids, stream=stream, stream_id=sid, device=device)
+                except InputLeaseError as exc:
+                    lease = exc.lease
+                    record['reuse'] = {'status': 'failed', 'error': repr(exc), 'block_id': lease.block_id}
+                    try:
+                        finish_one(lease)
+                    except Exception as cleanup_exc:
+                        record['cleanup_errors']['reuse_return'] = repr(cleanup_exc)
+                    raise
+                record['reuse'] = {'status': 'constructed', 'storage_id': lease.storage_id, 'block_id': lease.block_id}
+                if lease.storage_id != previous.storage_id or lease.block_id == previous.block_id:
+                    try:
+                        finish_one(lease)
+                    except Exception as exc:
+                        record['cleanup_errors']['mismatched_reuse_return'] = repr(exc)
+                    raise AssertionError('completed pool storage was not reused as a new lease')
+                finish_one(lease)
+                record['reuse']['status'] = 'completed'
+    except Exception as exc:
+        first_error = exc
+    try:
+        report = pool.destroy_pool(timeout_s=timeout_s)
+        record['destroy'] = _plain(report)
+        if not isinstance(record['destroy'], dict) or not record['destroy'].get('completed') or record['destroy'].get('pending') or record['destroy'].get('quarantined') or record['destroy'].get('leaked'):
+            raise RuntimeError('pool destroy incomplete')
+    except Exception as exc:
+        if hasattr(exc, 'report'):
+            record['destroy'] = _plain(exc.report)
+        record['cleanup_errors']['destroy'] = repr(exc)
+        if first_error is None:
+            first_error = exc
+    if first_error is not None:
+        raise first_error
+
+
+def _sample_resources(runtime, device):
+    result = {}
+    try:
+        free, total = runtime.npu.mem_get_info(device)
+        result['hbm_used_bytes'] = int(total - free)
+        result['hbm_total_bytes'] = int(total)
+    except Exception as exc:
+        result['hbm_unavailable'] = repr(exc)
+    try:
+        import resource
+        result['rss_peak_bytes'] = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+        lines = Path('/proc/self/status').read_text(encoding='utf8').splitlines()
+        current = next(line for line in lines if line.startswith('VmRSS:'))
+        result['rss_bytes'] = int(current.split()[1]) * 1024
+    except Exception as exc:
+        result['rss_unavailable'] = repr(exc)
+    return result
+
+
 @pytest.fixture
 def model_gate():
     if os.environ.get('FLAGMEMORY_ONEREC_ENABLE') != 'approved-single-forward':
@@ -166,14 +268,16 @@ def test_onerec_forward_consumes_pool_input_ids(model_gate):
                        base_allocator=allocator, tier_spec=TierSpec(8 << 20, 8 << 20, 2),
                        reuse=ReusePolicy(opportunistic=False), barrier_timeout_s=10)
     lease = None
+    stream = sid = ids = None
+    record = {'inputs': {'status': 'not_observed'}, 'consumer': {'status': 'not_observed'}, 'comparison': {'status': 'not_observed'}, 'observations': {}, 'returns': [], 'reuse': {'status': 'not_attempted'}, 'destroy': {'status': 'not_attempted'}, 'cleanup_errors': {}}
     succeeded = False
     hook = None
     output = last = None
     try:
-        import resource
-        free, total = torch.npu.mem_get_info(device)
-        hbm_before = int(total - free)
-        print({'hbm_before_bytes': hbm_before, 'hbm_observation_limit_bytes': model_gate['device_observation_limit_bytes']})
+        record['observations']['before_model'] = _sample_resources(torch, device)
+        hbm_before = record['observations']['before_model'].get('hbm_used_bytes')
+        if hbm_before is None:
+            raise RuntimeError('device memory observation unavailable')
         if hbm_before >= model_gate['device_observation_limit_bytes']:
             raise RuntimeError('device observation limit reached')
         tokenizer = transformers.AutoTokenizer.from_pretrained(model_gate['model_path'], local_files_only=True, trust_remote_code=False)
@@ -207,7 +311,11 @@ def test_onerec_forward_consumes_pool_input_ids(model_gate):
             except InputLeaseError as exc:
                 lease = exc.lease
                 raise
-            if not torch.equal(lease.tensor.cpu(), ids):
+            pooled_ids = lease.tensor.cpu()
+            equal = bool(torch.equal(pooled_ids, ids))
+            record['inputs'] = {'status': 'compared', 'equal': equal, 'ordinary_sha256': hashlib.sha256(str(ids.tolist()).encode()).hexdigest(), 'pooled_sha256': hashlib.sha256(str(pooled_ids.tolist()).encode()).hexdigest(), 'shape': list(ids.shape), 'nbytes': lease.nbytes, 'purpose': 'activation'}
+            del pooled_ids
+            if not equal:
                 raise ValueError('pooled input differs from baseline')
             seen = []
             def before_embedding(module, args):
@@ -226,32 +334,54 @@ def test_onerec_forward_consumes_pool_input_ids(model_gate):
                 hook = None
             if len(seen) != 1:
                 raise ValueError('embedding hook must run exactly once')
+            record['consumer'] = {'status': 'observed', **seen[0]}
             result = compare_forward(baseline, pooled, atol=model_gate['atol'], rtol=model_gate['rtol'])
-            free, total = torch.npu.mem_get_info(device)
-            hbm_after = int(total - free)
-            rss_peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
-            print({'hbm_after_bytes': hbm_after, 'rss_peak_bytes': rss_peak})
-            if hbm_after >= model_gate['device_observation_limit_bytes'] or rss_peak >= model_gate['host_memory_bytes']:
+            record['comparison'] = {'status': 'passed', **result}
+            record['observations']['after_forward'] = _sample_resources(torch, device)
+            observed = record['observations']['after_forward']
+            if 'hbm_used_bytes' not in observed or 'rss_peak_bytes' not in observed:
+                raise RuntimeError('resource observation unavailable')
+            if observed['hbm_used_bytes'] >= model_gate['device_observation_limit_bytes'] or observed['rss_peak_bytes'] >= model_gate['host_memory_bytes']:
                 raise RuntimeError('approved resource observation limit reached')
             succeeded = True
-            print({'consumer': seen[0], 'comparison': result, 'input_ids_sha256': hashlib.sha256(str(ids.tolist()).encode()).hexdigest(), 'input_shape': list(ids.shape), 'purpose': 'activation', 'allocated_bytes': lease.nbytes})
     finally:
+        import sys
+        primary = sys.exc_info()[1]
+        record['primary_error'] = repr(primary) if primary is not None else None
         if hook is not None:
-            hook.remove()
+            try:
+                hook.remove()
+            except Exception as exc:
+                record['cleanup_errors']['hook'] = repr(exc)
+                if primary is None:
+                    primary = exc
+        def clear_output():
+            nonlocal output, last
+            output = last = None
+        cleanup_error = None
         try:
-            if lease is not None and not lease.closed and not lease.return_attempted:
-                confirm_completion(backend, stream=stream, timeout_s=10)
-                output = last = None
-                release_input_ids(lease, pool, backend, stream=stream, timeout_s=10)
-                if succeeded:
-                    previous = lease
-                    lease = lease_input_ids(pool, torch, ids, stream=stream, stream_id=sid, device=device)
-                    if lease.storage_id != previous.storage_id or lease.block_id == previous.block_id:
-                        raise AssertionError('completed pool storage was not reused as a new lease')
-                    print({'reused_storage_id': lease.storage_id, 'new_block_id': lease.block_id})
-                    release_input_ids(lease, pool, backend, stream=stream, timeout_s=10)
+            _finish_pool(lease, pool=pool, backend=backend, runtime=torch, ids=ids,
+                         stream=stream, sid=sid, device=device,
+                         successful=succeeded and primary is None, record=record,
+                         clear_output=clear_output, observe=lambda: _sample_resources(torch, device))
+        except Exception as exc:
+            cleanup_error = exc
+            record['cleanup_errors']['finish'] = repr(exc)
         finally:
-            report = pool.destroy_pool(timeout_s=10)
-            print({'destroy': str(report), 'live_bytes': allocator.live_bytes, 'allocations': allocator.allocate_calls, 'releases': allocator.release_calls})
-            assert report.completed and not report.pending and not report.quarantined and not report.leaked
-            assert allocator.live_bytes == 0 and allocator.release_calls == allocator.allocate_calls
+            record['observations']['after_destroy'] = _sample_resources(torch, device)
+            record['allocator'] = {'live_bytes': allocator.live_bytes,
+                                   'allocated_bytes': allocator.allocated_bytes,
+                                   'allocate_calls': allocator.allocate_calls,
+                                   'release_calls': allocator.release_calls}
+            if allocator.live_bytes or allocator.release_calls != allocator.allocate_calls:
+                record['allocator']['status'] = 'not_fully_released'
+                if cleanup_error is None and primary is None:
+                    cleanup_error = RuntimeError('allocator did not fully release')
+            else:
+                record['allocator']['status'] = 'released'
+            print('ONEREC_INPUT_EVIDENCE ' + json.dumps(_plain(record), sort_keys=True))
+        if sys.exc_info()[1] is None:
+            if primary is not None:
+                raise primary
+            if cleanup_error is not None:
+                raise cleanup_error
