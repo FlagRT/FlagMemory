@@ -580,3 +580,76 @@ def test_healthy_pending_custody_can_complete_through_public_recovery(bridge_bun
     assert report.custody_id not in {entry.custody_id for entry in list_custodied_pools()}
     assert b.allocator.release_calls == 1 and b.allocator.live_bytes == 0
     assert b.backend.forbidden == []
+
+
+@pytest.mark.parametrize("observation", ["stream_device", "stream_key"])
+@pytest.mark.parametrize("entry", ["validate", "current", "equal", "record"])
+def test_identity_callback_device_drift_rejected_before_dependent_action(observation, entry):
+    b = Bundle()
+    bridge = b.build()
+    event = bridge.create_event(2)
+    original = getattr(b.identity, observation)
+    def drifting_identity(stream):
+        result = original(stream)
+        b.current = 0
+        return result
+    setattr(b.identity, observation, drifting_identity)
+    operations = {
+        "validate": lambda: bridge.validate_stream_device(b.default, 2),
+        "current": lambda: bridge.current_stream(2),
+        "equal": lambda: bridge.streams_equal(b.default, b.stream2),
+        "record": lambda: bridge.record_event(event, b.default),
+    }
+    with pytest.raises(InvalidArgument):
+        operations[entry]()
+    # A post-record rejection is too late: neither the public record nor its
+    # native side effect may occur after identity observation changed scope.
+    assert not [item for item in b.backend.audit if item[0] == "record"]
+    assert b.backend.events[0].recorded_stream is None
+    b.current = 2
+    with pytest.raises(EventNotRecorded):
+        bridge.query_event(event)
+    assert not [item for item in b.backend.audit if item[0] == "query"]
+
+
+def test_stream_key_hash_device_drift_rejected_before_public_record():
+    b = Bundle()
+    bridge = b.build()
+    event = bridge.create_event(2)
+    class DriftingKey:
+        def __hash__(self):
+            b.current = 0
+            return 42
+    b.identity.add(b.default, 2, DriftingKey())
+    with pytest.raises(InvalidArgument):
+        bridge.record_event(event, b.default)
+    assert not [item for item in b.backend.audit if item[0] == "record"]
+    assert b.backend.events[0].recorded_stream is None
+    b.current = 2
+    with pytest.raises(EventNotRecorded):
+        bridge.query_event(event)
+
+
+@pytest.mark.parametrize("failure,expected", [(RuntimeError("probe failed"), RuntimeError),
+                                             (ValueError("probe rejected"), InvalidArgument)])
+def test_final_probe_failure_after_identity_keeps_original_exception_contract(failure, expected):
+    b = Bundle()
+    bridge = b.build()
+    event = bridge.create_event(2)
+    original = b.identity.stream_key
+    def identity_then_failed_probe(stream):
+        result = original(stream)
+        b.current_error = failure
+        return result
+    b.identity.stream_key = identity_then_failed_probe
+    with pytest.raises(expected) as exc:
+        bridge.record_event(event, b.default)
+    if expected is RuntimeError:
+        assert exc.value is failure
+    else:
+        assert exc.value.__cause__ is failure
+    assert not [item for item in b.backend.audit if item[0] == "record"]
+    assert b.backend.events[0].recorded_stream is None
+    b.current_error = None
+    with pytest.raises(EventNotRecorded):
+        bridge.query_event(event)

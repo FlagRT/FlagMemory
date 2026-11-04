@@ -131,6 +131,9 @@ class DeviceContextBridge:
             hash(key)
         except TypeError as exc:
             raise InvalidArgument("stream identity key must be hashable") from exc
+        # Identity/key providers (including hash) run caller code. Complete all
+        # observations before the final device check used by dependent actions.
+        self._check_device(self._device_index, Capability.STREAM)
         return key
 
     def device_memory_info(self, device_index: int = 0) -> MemoryInfo:
