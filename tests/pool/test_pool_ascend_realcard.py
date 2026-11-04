@@ -1,14 +1,21 @@
 """Explicitly selected, bounded Ascend tests; requires independently approved mapping."""
 import os
 import pytest
-from ascend_test_adapter import AscendTestBackend, AscendTensorAllocator
+from ascend_test_adapter import AllocationBudget, AscendTestBackend, AscendTensorAllocator
 from flagmemory.pool import BlockState, PoolForm, Purpose, ReusePolicy, TierSpec, create_pool
 
 pytestmark = pytest.mark.realcard
 SIZE = 8 << 20
 
+@pytest.fixture(scope='session')
+def batch_budget():
+    try:
+        return AllocationBudget(int(os.environ['FLAGMEMORY_ASCEND_BYTE_LIMIT']))
+    except (KeyError, ValueError):
+        pytest.fail('explicit valid cumulative byte limit required')
+
 @pytest.fixture
-def setup():
+def setup(batch_budget):
     if os.environ.get('FLAGMEMORY_ASCEND_ENABLE') != 'approved-mapping-and-bounds':
         pytest.fail('explicit execution enable and validated device mapping required')
     try:
@@ -25,7 +32,7 @@ def setup():
     import torch_npu  # noqa: F401 -- registers the runtime
     torch.npu.set_device(device)
     backend = AscendTestBackend(torch, device)
-    allocator = AscendTensorAllocator(torch, device, limit)
+    allocator = AscendTensorAllocator(torch, device, batch_budget)
     pool = create_pool(backend, device_index=device, form=PoolForm.TENSOR,
                        base_allocator=allocator, tier_spec=TierSpec(SIZE, SIZE, 2),
                        reuse=ReusePolicy(opportunistic=False), barrier_timeout_s=10)
@@ -94,7 +101,10 @@ def test_pending_borrower_protection_when_observed(setup):
     sid = pool.register_stream(owner); bid = pool.register_stream(borrower)
     first = pool.alloc_on_stream(SIZE, stream_id=sid, purpose=Purpose.ACTIVATION)
     tensor = pool.access_block(first.block_id); identity = allocator.identity(tensor)
+    with torch.npu.stream(owner):
+        ready = torch.npu.Event(); ready.record(owner)
     with torch.npu.stream(borrower):
+        borrower.wait_event(ready)
         for i in range(8): tensor.fill_(i)
     pool.declare_cross_stream_use(first.block_id, bid)
     del tensor
@@ -104,7 +114,7 @@ def test_pending_borrower_protection_when_observed(setup):
     result = pool.drain_stream(timeout_s=0)
     print('borrower event query pending:', observed, 'drain:', result,
           'storage:', first.storage_id, 'identity:', identity, 'allocations:', allocator.allocate_calls)
-    observed = (observed and result.recoverable_timeout and result.still_pending == 1
+    observed = (observed and result.still_pending == 1
                 and not result.quarantined_blocks and not backend.query_event(event))
     if observed:
         second = pool.alloc_on_stream(SIZE, stream_id=sid, purpose=Purpose.ACTIVATION)

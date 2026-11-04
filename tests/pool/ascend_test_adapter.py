@@ -57,20 +57,30 @@ class AscendTestBackend:
     def free_handle(self, *args, **kwargs):
         raise CapabilityNotDeclared(Capability.MEMORY_HANDLE, self.name)
 
+class AllocationBudget:
+    """Cumulative successful requests, shared by all allocators in one batch."""
+    def __init__(self, limit):
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 0 < limit <= MAX_BYTES:
+            raise ValueError('byte limit must be in (0, 1 GiB]')
+        self.limit = limit
+        self.used = 0
+    def check(self, nbytes):
+        if self.used + nbytes > self.limit: raise MemoryError('cumulative allocation quota')
+
 class AscendTensorAllocator:
     def __init__(self, runtime, device_index, byte_limit):
-        if not isinstance(byte_limit, int) or isinstance(byte_limit, bool) or not 0 < byte_limit <= MAX_BYTES:
-            raise ValueError('byte limit must be in (0, 1 GiB]')
-        self.runtime = runtime; self.device_index = device_index; self.byte_limit = byte_limit
+        self.budget = byte_limit if isinstance(byte_limit, AllocationBudget) else AllocationBudget(byte_limit)
+        self.runtime = runtime; self.device_index = device_index
         self.live = {}; self.live_bytes = 0; self.allocated_bytes = 0
         self.allocate_calls = 0; self.release_calls = 0
     def allocate(self, nbytes, device_index=0, *, stream):
         if device_index != self.device_index: raise ValueError('device mismatch')
         validate_stream(stream, device_index)
         if not isinstance(nbytes, int) or isinstance(nbytes, bool) or nbytes <= 0: raise ValueError('invalid size')
-        if self.allocated_bytes + nbytes > self.byte_limit: raise MemoryError('cumulative allocation quota')
+        self.budget.check(nbytes)
         with self.runtime.npu.device(device_index), self.runtime.npu.stream(stream):
             tensor = self.runtime.empty(nbytes, dtype=self.runtime.uint8, device=f'npu:{device_index}')
+        self.budget.used += nbytes
         self.live[id(tensor)] = (tensor, nbytes)
         self.live_bytes += nbytes; self.allocated_bytes += nbytes; self.allocate_calls += 1
         return tensor
