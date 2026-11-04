@@ -83,8 +83,6 @@ class Ledger:
 
     def __init__(self) -> None:
         self._blocks: dict[int, Block] = {}
-        #: 已撤销租约号（用于区分「非本池租约」与「重复归还」）
-        self._retired: set[int] = set()
         self._leases: dict[int, Block] = {}
         #: 档位 → 可复用块标识（先进先出，便于复现问题）
         self._free: dict[int, list[int]] = {}
@@ -114,29 +112,19 @@ class Ledger:
 
     def revoke(self, block: Block) -> None:
         self._leases.pop(block.block_id, None)
-        self._retired.add(block.block_id)
 
     # —— 查询 ——
 
     def get(self, block_id: int) -> Block:
-        """按标识取块。
+        """只认当前活租约，不保存随请求历史增长的退休编号集合。
 
-        `I-1`：这里是重复归还与非本池块的拦截点，**不等厂商报错**。两种情形分开报，
-        因为对调用方是两个不同的 bug：
-        - 标识在已归还集合里 ⇒ 重复归还（或拿着失效引用继续用）；
-        - 标识从没发过 ⇒ 非本池块。
+        进程级发号器不重发旧号；不在活映射中的凭据统一拒绝，不改变当前块。
         """
         block = self._leases.get(block_id)
         if block is not None:
             return block
-        if block_id in self._retired:
-            raise OwnershipViolation(
-                f"租约 {block_id} 已撤销（重复归还，或拿着失效引用继续用）。"
-                f"按 I-1，这是池自己的账本拦下的，没有依赖厂商报错 —— "
-                f"昇腾的裸释放对二次释放静默返回成功，指望厂商报在那一家上会完全失效。"
-            )
         raise OwnershipViolation(
-            f"块 {block_id} 不是本池发出的（账本里没有，也不在已归还集合里）。"
+            f"租约 {block_id} 不是本池当前活租约（非本池、重复归还或已失效），未改变任何块。"
         )
 
     def require_live(self, block_id: int) -> Block:
@@ -216,7 +204,7 @@ class Ledger:
     # —— 终结与隔离 ——
 
     def retire(self, block: Block) -> None:
-        """块已交回底座：从账本摘除，标识进已归还集合（不复用）。"""
+        """块已交回底座：从账本摘除并撤销租约，不保留退休编号历史。"""
         self._blocks.pop(block.storage_id, None)
         self.drop_free(block)
         self.revoke(block)

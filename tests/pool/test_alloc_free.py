@@ -183,7 +183,7 @@ class TestError:
     def test_非本池块报错(self, handle_pool):
         with pytest.raises(OwnershipViolation) as exc:
             handle_pool.free_block(123456)
-        assert "不是本池发出的" in str(exc.value)
+        assert "不是本池当前活租约" in str(exc.value)
 
     def test_归还已交回底座的块报重复归还(self, handle_pool):
         view = handle_pool.alloc_on_stream(1 << 20, purpose=Purpose.ACTIVATION)
@@ -192,7 +192,7 @@ class TestError:
         handle_pool.compact()
         with pytest.raises(OwnershipViolation) as exc:
             handle_pool.free_block(view.block_id)
-        assert "已撤销" in str(exc.value)
+        assert "已失效" in str(exc.value)
 
     def test_重复归还不妨碍健康块完成后复用(self, handle_pool):
         view = handle_pool.alloc_on_stream(1 << 20, purpose=Purpose.ACTIVATION)

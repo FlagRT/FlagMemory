@@ -372,3 +372,126 @@ def test_backend_without_device_validation_is_rejected():
     with pytest.raises(InvalidArgument):
         create_pool(backend, form=PoolForm.TENSOR, base_allocator=Allocator(),
                     tier_spec=TierSpec(base_bytes=16, step_bytes=16, tier_count=4))
+
+
+def test_repeated_storage_reuse_keeps_lease_metadata_bounded():
+    """A single resident block must not accumulate one record per past lease."""
+    pool, backend, allocator = make_pool()
+    old_leases = []
+    retained_records = []
+    for cycle in range(256):
+        lease = allocate(pool)
+        old_leases.append(lease.block_id)
+        pool.free_block(lease.block_id)
+        backend.complete()
+        pool.drain_stream(timeout_s=0)
+        if cycle + 1 in (8, 128, 256):
+            # Count retained ledger collection entries, not allocator/test history.
+            retained_records.append(sum(
+                len(value) for value in vars(pool._ledger).values()
+                if isinstance(value, (dict, list, set))
+            ))
+    assert retained_records[0] == retained_records[1] == retained_records[2], retained_records
+    current = allocate(pool)
+    assert len(allocator.refs) == 1
+    for stale in old_leases:
+        for action in (pool.free_block, pool.block_view, pool.verify_block_ownership, pool.access_block):
+            with pytest.raises(OwnershipViolation):
+                action(stale)
+        with pytest.raises(OwnershipViolation):
+            pool.declare_cross_stream_use(stale, 0)
+    assert pool.block_view(current.block_id).state is BlockState.IN_USE
+    assert pool.query_audit().quarantined_blocks == 0
+    finish(pool, backend, current)
+
+
+class FirstUseNotReady(RuntimeError):
+    pass
+
+
+class FirstUseResource:
+    """Host-only contract model: memory cannot be consumed on an unready stream."""
+    def __init__(self, nbytes):
+        self._data = bytearray(nbytes)
+        self._ready_stream = None
+        self.writes = 0
+
+    def establish_ready(self, stream):
+        self._ready_stream = stream
+
+    def write_on(self, stream, content):
+        if stream is not self._ready_stream:
+            raise FirstUseNotReady("first consumption has no target-stream readiness")
+        self._data[:] = content
+        self.writes += 1
+
+    def read_on(self, stream):
+        if stream is not self._ready_stream:
+            raise FirstUseNotReady("first consumption has no target-stream readiness")
+        return bytes(self._data)
+
+
+class FirstUseAllocator(Allocator):
+    """A correct adapter and two deliberately broken adapters for the same consumer."""
+    def __init__(self, mode, fallback_stream):
+        super().__init__()
+        self.mode = mode
+        self.fallback_stream = fallback_stream
+
+    def allocate(self, nbytes, device_index=0, *, stream):
+        resource = FirstUseResource(nbytes)
+        if self.mode == "target":
+            resource.establish_ready(stream)
+        elif self.mode == "ignored_target":
+            resource.establish_ready(self.fallback_stream)
+        elif self.mode != "missing_dependency":
+            raise AssertionError("unknown adapter mode")
+        self.refs.append(weakref.ref(resource))
+        return resource
+
+
+def consume_first_target_allocation(mode):
+    """Exercise the real pool/access path; model only the adapter's readiness rule."""
+    backend = AsyncBackend()
+    target, fallback = backend.stream(0), backend.stream(0)
+    allocator = FirstUseAllocator(mode, fallback)
+    pool = create_pool(backend, form=PoolForm.TENSOR, base_allocator=allocator,
+                       tier_spec=TierSpec(base_bytes=16, step_bytes=16, tier_count=4))
+    sid = pool.register_stream(target)
+    first = pool.alloc_on_stream(16, stream_id=sid, purpose=Purpose.ACTIVATION)
+    try:
+        ref = pool.access_block(first.block_id)
+        # This is the first consumer operation, not an assertion about a logged argument.
+        ref.write_on(target, b"0123456789abcdef")
+        assert ref.read_on(target) == b"0123456789abcdef"
+        assert allocator.refs[0]() is ref
+    finally:
+        del ref
+        pool.free_block(first.block_id)
+        backend.complete()
+        pool.drain_stream(timeout_s=0)
+        # On a deliberately broken adapter, close before propagating consumption failure.
+        if mode != "target":
+            pool.destroy_pool()
+    second = pool.alloc_on_stream(16, stream_id=sid, purpose=Purpose.ACTIVATION)
+    assert second.storage_id == first.storage_id and second.block_id != first.block_id
+    assert len(allocator.refs) == 1
+    with pytest.raises(OwnershipViolation):
+        pool.access_block(first.block_id)
+    ref = pool.access_block(second.block_id)
+    assert ref.read_on(target) == b"0123456789abcdef"
+    ref.write_on(target, b"fedcba9876543210")
+    assert ref.read_on(target) == b"fedcba9876543210"
+    del ref
+    finish(pool, backend, second)
+
+
+def test_first_target_consumption_reads_and_writes_public_pool_storage():
+    consume_first_target_allocation("target")
+
+
+@pytest.mark.parametrize("mode", ["ignored_target", "missing_dependency"])
+def test_first_target_consumption_rejects_broken_readiness_adapters(mode):
+    # The same first consumer operation must reject an adapter that only accepts stream.
+    with pytest.raises(FirstUseNotReady, match="no target-stream readiness"):
+        consume_first_target_allocation(mode)
