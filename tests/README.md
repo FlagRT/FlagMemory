@@ -32,3 +32,10 @@ pytest tests/interfaces -q
 旧真卡文件的取证逻辑默认仅打印 JSON；`FLAGMEMORY_REALCARD_EVIDENCE` 非空时才按给定路径写入。该旧逻辑不会自动拦截仓内路径，使用者须显式指定仓外位置，不得覆盖已有证据。此说明不是执行旧文件的许可。
 
 探针脚本随包分发，按各目录说明以脚本调用，不作为稳定模块 API。`reports/` 仍含历史数据，证据迁移未收口；本次文档工作不迁、不删、不改历史材料。三栈卸载证据与池首次芯片运行证据分别核对。
+
+
+### Ascend test preparation
+
+The standalone `tests/pool/test_pool_ascend_realcard.py` is a candidate test entry, not a hardware result. It requires an independently verified physical-to-logical mapping, isolation, runtime APIs, nonblocking event query, an exclusive window, resource limits and separate approval. The fixture requires explicit `FLAGMEMORY_ASCEND_ENABLE=approved-mapping-and-bounds`, `FLAGMEMORY_ASCEND_DEVICE`, `FLAGMEMORY_ASCEND_BYTE_LIMIT` (at most 1 GiB cumulative), and `FLAGMEMORY_ASCEND_QUERY_NONBLOCKING=verified`. Select that file explicitly with `-o addopts= -m realcard`; never infer physical identity from the logical number. Use an external watchdog and bounded output. A skipped pending observation means uncovered, not passed. The quota excludes runtime internal allocations and caching. Cleanup errors are failures.
+
+The obsolete CUDA suite is disabled unless both its exact file is selected and `FLAGMEMORY_ENABLE_LEGACY_CUDA=I_ACCEPT_LEGACY_RISKS` is set. It contains hazardous and outdated tests and is not an Ascend test. Collection does not import the framework.

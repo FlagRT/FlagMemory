@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,14 +35,15 @@ from flagmemory.pool import (
 
 pytestmark = pytest.mark.realcard
 
+if (os.environ.get("FLAGMEMORY_ENABLE_LEGACY_CUDA") != "I_ACCEPT_LEGACY_RISKS"
+        or not any(arg.replace("\\", "/").endswith("/test_pool_realcard.py")
+                   or arg == "test_pool_realcard.py" for arg in sys.argv[1:])):
+    pytest.skip("legacy CUDA suite disabled", allow_module_level=True)
+
 # 模块必须在无框架环境里也能 import：默认那批用例靠 `-m 'not realcard'` 把本文件**整体
 # deselect**，而不是靠 skip 掩盖。所以 torch 在这里只是「有则用」，缺了由夹具报 skip。
-try:  # pragma: no cover - 装了宿主栈才走上面那支
-    import torch
-except ImportError:  # pragma: no cover
-    torch = None  # type: ignore[assignment]
+torch = None  # imported only in the explicitly enabled fixture
 
-#: 用哪张卡。默认 0 号；与共享用户错峰时用环境变量换一张空闲的。
 DEVICE_INDEX = int(os.environ.get("FLAGMEMORY_REALCARD_DEVICE", "0"))
 
 #: 默认仅打印；非空才写指定路径。调用方须显式选仓外路径，代码不自动验证该边界。
@@ -169,8 +171,9 @@ def measure_granularity(device_index: int, probe_bytes: int = 1) -> tuple[int, i
 
 @pytest.fixture(scope="module")
 def device_index() -> int:
-    if torch is None:
-        pytest.skip("真卡用例要宿主栈的 torch，这台机器上没装")
+    global torch
+    import torch as torch_module
+    torch = torch_module
     if not torch.cuda.is_available() or torch.cuda.device_count() <= DEVICE_INDEX:
         pytest.skip(f"这台机器上取不到 {DEVICE_INDEX} 号卡")
     torch.cuda.set_device(DEVICE_INDEX)
