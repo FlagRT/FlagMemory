@@ -10,7 +10,7 @@
 检两条规则：
 
   规则 1  flagmemory/pool/** 与 flagmemory/caps/** 里不许 import 推理框架与厂商运行时。
-  规则 2  flagmemory/pool/** 不许 import flagmemory.tiering 与 flagmemory.profiling。
+  规则 2  flagmemory/pool/** 不许 import flagmemory.tiering、flagmemory.profiling 与 flagmemory.adapters。
 
 **用 ast 静态扫描，不靠 import**：本仓刻意零依赖，门禁机器上没有 torch / vLLM，
 真 import 一定失败，分不清「违规」和「环境没装」。静态扫描还能抓到函数内的延迟
@@ -68,6 +68,7 @@ POOL_FORBIDDEN_PACKAGES: frozenset[str] = frozenset(
     {
         "flagmemory.tiering",
         "flagmemory.profiling",
+        "flagmemory.adapters",
     }
 )
 
@@ -243,7 +244,7 @@ def main(argv: list[str]) -> int:
 
     if not violations:
         print("规则 1 池本体与能力层不依赖推理框架 / 厂商运行时：通过")
-        print("规则 2 池本体不依赖 flagmemory.tiering / flagmemory.profiling：通过")
+        print("规则 2 池本体不依赖 flagmemory.tiering / flagmemory.profiling / flagmemory.adapters：通过")
         print("门禁通过，没有发现违规 import。")
         return 0
 

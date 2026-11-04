@@ -227,3 +227,13 @@ class TestError:
         assert len(violations) == 1
         assert violations[0].rule == "语法"
         assert _run(root).returncode == 1
+
+
+@pytest.mark.parametrize("body", ["from flagmemory.adapters import device_context\n",
+                                  "from ..adapters import device_context\n",
+                                  "import flagmemory.adapters.device_context\n"])
+def test_pool_cannot_import_optional_device_adapters(tmp_path, body):
+    root = _make_tree(tmp_path, {**CLEAN_TREE, "flagmemory/pool/bad.py": body})
+    violations = gate.check(root)
+    assert len(violations) == 1 and violations[0].rule == "规则 2"
+    assert _run(root).returncode == 1
