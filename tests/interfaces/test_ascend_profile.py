@@ -251,3 +251,31 @@ def test_cleanup_failure_keeps_report_and_all_error_objects(monkeypatch, consume
     assert caught.value.__cause__.free_error is free
     assert caught.value.__cause__.destroy_error is destroy
     assert caught.value.__cause__.destroy_report is report
+
+def test_consumer_explicit_cause_is_preserved_with_cleanup_failures(monkeypatch):
+    import examples.device_context_tensor_pool as example
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    root = ValueError('underlying cause')
+    consumer = RuntimeError('consumer')
+    free = RuntimeError('free')
+    destroy = RuntimeError('destroy')
+    report = object()
+    destroy.report = report
+    class Pool:
+        def alloc_on_stream(self, *a, **kw): return SimpleNamespace(block_id=1)
+        def access_block(self, *a): return bytearray(1)
+        def free_block(self, *a): raise free
+        def destroy_pool(self, **kw): raise destroy
+    monkeypatch.setattr(example, 'create_pool', lambda *a, **kw: Pool())
+    stream = SimpleNamespace(context=nullcontext)
+    bridge = SimpleNamespace(current_stream=lambda index: stream, validate_stream_device=lambda stream, index: None)
+    def consume(_): raise consumer from root
+    with pytest.raises(RuntimeError) as caught:
+        example.consume_once(bridge, None, tier_spec=None, nbytes=1, consume=consume)
+    assert caught.value is consumer
+    assert consumer.__context__ is None
+    assert consumer.__cause__ is root
+    detail = consumer.cleanup_failures
+    assert detail.free_error is free and detail.destroy_error is destroy
+    assert detail.destroy_report is report and consumer.destroy_report is report

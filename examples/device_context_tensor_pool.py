@@ -11,7 +11,7 @@ from flagmemory.adapters.device_context import DeviceContextBridge
 
 
 class CleanupFailures(Exception):
-    """Structured cleanup outcomes attached as the primary exception's cause."""
+    """Structured cleanup outcomes, attached to the primary exception."""
 
     def __init__(self, free_error: BaseException | None,
                  destroy_error: BaseException | None,
@@ -63,6 +63,10 @@ def consume_once(bridge: DeviceContextBridge, allocator: BaseAllocator, *,
             except (AttributeError, TypeError):
                 pass
         if free_error is not None or destroy_error is not None or (report is not None and not report_attached):
-            raise primary from CleanupFailures(free_error, destroy_error, report)
+            cleanup = CleanupFailures(free_error, destroy_error, report)
+            if primary.__cause__ is not None:
+                BaseException.__setattr__(primary, "cleanup_failures", cleanup)
+                raise primary
+            raise primary from cleanup
         raise primary
     return report
