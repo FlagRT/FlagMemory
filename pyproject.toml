@@ -13,7 +13,7 @@ dependencies = []
 
 [project.optional-dependencies]
 # 开发与门禁用；真卡实测不在这里，靠 pytest 标记区分（见 tests/README.md）。
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "mypy>=1.8"]
 
 [tool.setuptools.packages.find]
 # import 路径是 flagmemory.*；offload.* 是兼容别名包，0.2.x 有效、0.3.0 移除，

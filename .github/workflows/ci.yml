@@ -34,5 +34,12 @@ jobs:
       - name: 分层门禁（池本体与能力层不碰框架、方向只许向下）
         run: python tools/check_layering.py
 
+      - name: 接口存根过类型检查
+        # 按显存池设计文档第五节：类型存根充当招标口径的「接口头文件」，理由之一是**可检验性**
+        # ——「类型存根能被类型检查器与单测直接校验，属可持续门禁」。这一步是那句话的前半句；
+        # 后半句（存根与实现的形参一致）由下一步单测里的 tests/interfaces/ 钉。
+        # --follow-imports=silent：这个门禁只判存根本身，不替其他模块做全仓严格体检。
+        run: mypy --strict --follow-imports=silent flagmemory/interfaces/pool.pyi
+
       - name: 单测（真卡用例自动 deselect）
         run: pytest
