@@ -412,6 +412,68 @@ def lifecycle(mapping_path, runtime_path, health_path):
         cases = [case.get("name") for case in root.iter("testcase")]
         return validate_lifecycle_report(cases, returncode=code, **totals)
 
+
+BRIDGE_FILE = "tests/pool/test_pool_device_context_ascend_realcard.py"
+BRIDGE_NODEIDS = tuple(BRIDGE_FILE+"::"+name for name in LIFECYCLE_TESTS)
+
+
+def bridge_helper():
+    root=Path(__file__).resolve().parents[1]/"tests/pool"
+    sys.path.insert(0,str(root))
+    import device_context_ascend_case
+    return device_context_ascend_case
+
+
+def validate_bridge_lifecycle_report(nodeids, *, tests, failures, errors, skipped, returncode):
+    if sorted(nodeids) != sorted(BRIDGE_NODEIDS):
+        raise ProbeRefused("exact new bridge lifecycle nodeids required")
+    result=validate_lifecycle_report([name.split("::")[-1] for name in nodeids],
+        tests=tests,failures=failures,errors=errors,skipped=skipped,returncode=returncode)
+    result.update(adapter_kind="device-context-ascend-profile",nodeids=list(nodeids))
+    return result
+
+
+def bridge_lifecycle(mapping_path, runtime_path, health_path, device_source_path):
+    mapping=validate_prior(mapping_path,"mapping")
+    validate_prior(health_path,"health")
+    validate_runtime_evidence(runtime_path)
+    if (mapping.get("user_device"),mapping.get("logical_device"),mapping.get("physical_device")) != (0,0,15):
+        raise ProbeRefused("identity mapping for physical target 15 required")
+    helper=bridge_helper()
+    try:
+        digest=os.environ.get("FLAGMEMORY_DEVICE_MANIFEST_SHA256")
+        manifest=helper.load_manifest(Path(device_source_path),digest)
+        helper.verify_runtime_origins(Path(device_source_path).parent)
+    except ValueError as exc: raise ProbeRefused(str(exc)) from exc
+    selected=str(Path(__file__).resolve().parents[1]/BRIDGE_FILE)
+    common=[sys.executable,"-B","-m","pytest",selected,"-q","-s","-o","addopts=","-m","realcard","-p","no:cacheprovider"]
+    collected=bounded_symbols(common+["--collect-only"],timeout_s=30,limit=1<<20)
+    nodeids=[line.strip() for line in collected.splitlines() if "::test_" in line]
+    if sorted(nodeids) != sorted(BRIDGE_NODEIDS):
+        raise ProbeRefused("new bridge collection differs from exact approved nodeids")
+    env=dict(os.environ)
+    env.update(FLAGMEMORY_ASCEND_ENABLE="approved-bridge-lifecycle",FLAGMEMORY_ASCEND_DEVICE="0",
+        FLAGMEMORY_ASCEND_BYTE_LIMIT=str(64<<20),FLAGMEMORY_ASCEND_QUERY_NONBLOCKING="verified",
+        FLAGMEMORY_DEVICE_SOURCE=str(Path(device_source_path).resolve()))
+    with tempfile.TemporaryDirectory(prefix="flagmemory-bridge-lifecycle-") as temp:
+        report_path=Path(temp)/"report.xml"
+        process=subprocess.Popen(common+["--junitxml",str(report_path)],stdin=subprocess.DEVNULL,env=env,shell=False)
+        try: code=process.wait(timeout=240)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+            raise ProbeFailure("bridge lifecycle child deadline")
+        if not report_path.is_file() or report_path.stat().st_size > 1<<20:
+            raise ProbeFailure("bounded bridge lifecycle report missing")
+        root=ET.parse(report_path).getroot()
+        suites=[root] if root.tag=="testsuite" else list(root.findall("testsuite"))
+        totals={key:sum(int(suite.get(key,"0")) for suite in suites) for key in ("tests","failures","errors","skipped")}
+        ids=[case.get("classname","").replace(".","/")+".py::"+case.get("name","") for case in root.iter("testcase")]
+        result=validate_bridge_lifecycle_report(ids,returncode=code,**totals)
+        result["device_runtime"]={key:manifest[key] for key in ("source_repository","source_commit","runtime_tree")}
+        result["device_runtime"]["manifest_sha256"]=digest
+        return result
+
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     sub=parser.add_subparsers(dest="stage",required=True)
@@ -431,6 +493,11 @@ def main(argv=None):
     life.add_argument("--mapping",required=True)
     life.add_argument("--runtime-evidence",required=True)
     life.add_argument("--health",required=True)
+    bridge=sub.add_parser("bridge-lifecycle")
+    bridge.add_argument("--mapping",required=True)
+    bridge.add_argument("--runtime-evidence",required=True)
+    bridge.add_argument("--health",required=True)
+    bridge.add_argument("--device-source",required=True)
     args=parser.parse_args(argv)
     started=time.monotonic()
     result={"schema":1,"stage":args.stage,"run_id":os.environ.get("FLAGMEMORY_RUN_ID"),
@@ -442,6 +509,8 @@ def main(argv=None):
         elif args.stage=="mapping":
             result.update(map_device(load_reviewed_acl(args.evidence),
                           expected_physical=args.expected_physical,environment=dict(os.environ)))
+        elif args.stage=="bridge-lifecycle":
+            result.update(bridge_lifecycle(args.mapping,args.runtime_evidence,args.health,args.device_source))
         elif args.stage=="lifecycle":
             result.update(lifecycle(args.mapping,args.runtime_evidence,args.health))
         else:

@@ -274,3 +274,55 @@ def test_symbol_capture_keeps_exact_limit_and_nonzero_exit_semantics():
     assert probe.bounded_symbols([sys.executable,"-c","import os; os.write(1,b'x'*1024)"],limit=1024,timeout_s=3)=="x"*1024
     with pytest.raises(probe.ProbeRefused,match="reader failed"):
         probe.bounded_symbols([sys.executable,"-c","raise SystemExit(7)"],limit=1024,timeout_s=3)
+
+def test_bridge_report_requires_exact_nodeids_and_no_skip():
+    validate=getattr(probe,'validate_bridge_lifecycle_report',None)
+    assert callable(validate), 'new exact bridge report validator required'
+    names=['tests/pool/test_pool_device_context_ascend_realcard.py::'+name for name in probe.LIFECYCLE_TESTS]
+    assert validate(names,tests=3,failures=0,errors=0,skipped=0,returncode=0)['status']=='passed'
+    assert validate(names,tests=3,failures=0,errors=0,skipped=1,returncode=0)['status']=='uncovered'
+    with pytest.raises(probe.ProbeRefused): validate([n.replace('device_context_','') for n in names],tests=3,failures=0,errors=0,skipped=0,returncode=0)
+
+def test_bridge_source_refused_before_collect_or_framework(tmp_path,monkeypatch):
+    monkeypatch.setattr(probe,'validate_prior',lambda path,stage:dict(user_device=0,logical_device=0,physical_device=15))
+    monkeypatch.setattr(probe,'validate_runtime_evidence',lambda path:{})
+    monkeypatch.setattr(probe,'bounded_symbols',lambda *a,**kw:pytest.fail('collection before source validation'))
+    monkeypatch.setenv('FLAGMEMORY_DEVICE_MANIFEST_SHA256','0'*64)
+    before=set(sys.modules)
+    with pytest.raises(probe.ProbeRefused):probe.bridge_lifecycle('mapping','runtime','health',str(tmp_path/'missing.json'))
+    assert not (set(sys.modules)-before)&{'runtime','torch','torch_npu'}
+
+
+@pytest.mark.parametrize('mode',['passed','skip','old_collection','wrong_report'])
+def test_bridge_probe_parses_new_child_report_and_retains_case_output(tmp_path,monkeypatch,mode):
+    monkeypatch.setattr(probe,'validate_prior',lambda path,stage:dict(user_device=0,logical_device=0,physical_device=15))
+    monkeypatch.setattr(probe,'validate_runtime_evidence',lambda path:{})
+    helper=probe.bridge_helper()
+    manifest={'source_repository':'https://github.com/FlagRT/runtime-team','source_commit':helper.RUNTIME_COMMIT,'runtime_tree':helper.RUNTIME_TREE}
+    monkeypatch.setattr(helper,'load_manifest',lambda path,digest:manifest)
+    monkeypatch.setattr(helper,'verify_runtime_origins',lambda path:None)
+    monkeypatch.setenv('FLAGMEMORY_DEVICE_MANIFEST_SHA256','a'*64)
+    names=list(probe.BRIDGE_NODEIDS)
+    if mode=='old_collection': names=[name.replace('device_context_','') for name in names]
+    monkeypatch.setattr(probe,'bounded_symbols',lambda *a,**kw:'\n'.join(names))
+    calls=[]
+    class Process:
+        def __init__(self,argv,**kwargs):
+            assert '-s' in argv, 'successful per-case observations must be retained'
+            calls.append(argv)
+            assert kwargs['env']['FLAGMEMORY_ASCEND_ENABLE']=='approved-bridge-lifecycle'
+            assert kwargs['env']['FLAGMEMORY_ASCEND_BYTE_LIMIT']==str(64<<20)
+            file=Path(argv[argv.index('--junitxml')+1])
+            classname='tests.pool.test_pool_device_context_ascend_realcard' if mode!='wrong_report' else 'tests.pool.test_pool_ascend_realcard'
+            cases=''.join('<testcase classname="'+classname+'" name="'+name+'"/>' for name in probe.LIFECYCLE_TESTS)
+            file.write_text('<testsuite tests="3" failures="0" errors="0" skipped="'+('1' if mode=='skip' else '0')+'">'+cases+'</testsuite>')
+        def wait(self,timeout):return 0
+    monkeypatch.setattr(probe.subprocess,'Popen',Process)
+    if mode in ('old_collection','wrong_report'):
+        with pytest.raises(probe.ProbeRefused):probe.bridge_lifecycle('m','r','h',str(tmp_path/'manifest.json'))
+        if mode=='old_collection':assert not calls
+    else:
+        result=probe.bridge_lifecycle('m','r','h',str(tmp_path/'manifest.json'))
+        assert result['status']==('uncovered' if mode=='skip' else 'passed')
+        assert result['adapter_kind']=='device-context-ascend-profile'
+        assert result['device_runtime']['manifest_sha256']=='a'*64

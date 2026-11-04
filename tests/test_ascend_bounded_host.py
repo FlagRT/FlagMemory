@@ -381,3 +381,87 @@ def test_source_digest_uses_case_sensitive_relative_posix_order_across_parent_pa
     # Independently fixed from UTF-8 relative name + NUL + raw SHA256(content) records.
     expected="2b01815d6312cb15f7cdb0cec90fce46ef640c7d9225c5fe7e9e0f1cf5e7ff02"
     assert [runner.source_digest(root) for root in roots]==[expected,expected]
+
+def test_bridge_stage_is_separate_fixed_command():
+    argv=runner.build_create_argv(image=runner.IMAGE_ID,name='bridge-case',run_id='a',source_dir=str(ROOT),stage='bridge-lifecycle')
+    assert 'bridge-lifecycle' in argv and '--device-source' in argv
+    assert argv[argv.index('--device-source')+1] == '/work/device-runtime/manifest.json'
+    assert not any('privileged' in a or 'network=host' in a for a in argv)
+
+def test_bridge_stage_refuses_unbound_export_before_create(valid_run):
+    valid_run['stage']='bridge-lifecycle'
+    docker,result=run(None,valid_run)
+    assert result['status']=='refused'
+    assert not any(call[:2]==['docker','create'] for call in docker.calls)
+
+
+def test_old_adapter_payload_cannot_satisfy_bridge_result():
+    validate=getattr(runner,'validate_bridge_result',None)
+    assert callable(validate),'bridge payload identity validation required'
+    payload={'status':'passed','executed':3,'failures':0,'errors':0,'skipped':0,'adapter_kind':'old-direct-adapter'}
+    with pytest.raises(runner.Refused): validate(payload,{'manifest_sha256':'a'*64})
+
+
+@pytest.fixture
+def bridge_run(valid_run,monkeypatch):
+    sys.path.insert(0,str(ROOT/'tests/pool'))
+    import device_context_ascend_case as helper
+    source=Path(valid_run['source_dir']); export=source/'device-runtime'; package=export/'runtime'; package.mkdir(parents=True)
+    raw=b'# synthetic host export\n'; (package/'__init__.py').write_bytes(raw)
+    blob=hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
+    entry=b'100644 __init__.py\0'+bytes.fromhex(blob)
+    tree=hashlib.sha1(b'tree '+str(len(entry)).encode()+b'\0'+entry).hexdigest()
+    monkeypatch.setattr(helper,'RUNTIME_TREE',tree)
+    manifest={'source_repository':'https://github.com/FlagRT/runtime-team','source_commit':helper.RUNTIME_COMMIT,
+        'runtime_tree':tree,'count':1,'total_bytes':len(raw),'files':[{'path':'__init__.py','bytes':len(raw),
+        'git_blob':blob,'sha256':hashlib.sha256(raw).hexdigest(),'mode':'100644'}]}
+    file=export/'manifest.json'; file.write_text(json.dumps(manifest))
+    identity={key:manifest[key] for key in ('source_repository','source_commit','runtime_tree')}
+    identity['manifest_sha256']=hashlib.sha256(file.read_bytes()).hexdigest()
+    path=Path(valid_run['preflight_path']); data=json.loads(path.read_text())
+    data['device_runtime']=identity; data['source_sha256']=runner.source_digest(source)
+    common={'status':'passed','image_id':runner.IMAGE_ID,'source_sha256':data['source_sha256'],'run_id':'prior'}
+    data['inputs']={}
+    for name in ('mapping','runtime','health'):
+        prior=dict(common,stage=name)
+        if name=='mapping': prior.update(user_device=0,logical_device=0,physical_device=15)
+        f=path.parent/(name+'.json'); f.write_text(json.dumps(prior)); data['inputs'][name+'.json']=str(f)
+    path.write_text(json.dumps(data)); valid_run['stage']='bridge-lifecycle'
+    return valid_run,identity
+
+
+class BridgeDocker(FakeDocker):
+    def call(self,argv,timeout_s):
+        result=super().call(argv,timeout_s)
+        if argv[:2]==['docker','create']:
+            self.current['Config'].update(Entrypoint=['python3'],Cmd=argv[argv.index(runner.IMAGE_ID)+1:],
+                Env=[argv[i+1] for i,x in enumerate(argv) if x=='--env'])
+            if self.mode=='wrong_command': self.current['Config']['Cmd'][2]='lifecycle'
+        return result
+
+
+@pytest.mark.parametrize('mode',[None,'skip','old_adapter','wrong_nodeids','wrong_runtime','wrong_command','never_exits','nonzero','rm_timeout'])
+def test_new_bridge_result_and_cleanup_are_bound_to_exact_stage(bridge_run,mode):
+    args,identity=bridge_run; docker=BridgeDocker(mode)
+    docker.source_dir=args['source_dir']; docker.input_dir=str(Path(args['run_dir'])/'input')
+    class Process(FakeProcess):
+        def read(self,max_bytes,timeout_s):
+            if mode=='never_exits': docker.now+=10; return b''
+            if self.sent:return b''
+            self.sent=True
+            payload=dict(schema=1,stage='bridge-lifecycle',status='uncovered' if mode=='skip' else 'passed',
+                image_id=runner.IMAGE_ID,run_id=docker.run_id,source_sha256=docker.source_sha,
+                adapter_kind='device-context-ascend-profile',nodeids=list(runner.BRIDGE_NODEIDS),
+                device_runtime=dict(identity),executed=3,failures=0,errors=0,skipped=1 if mode=='skip' else 0)
+            if mode=='old_adapter':payload['adapter_kind']='old-direct-adapter'
+            if mode=='wrong_nodeids':payload['nodeids'][0]='tests/pool/test_pool_ascend_realcard.py::'+runner.EXPECTED_TESTS[0]
+            if mode=='wrong_runtime':payload['device_runtime']['manifest_sha256']='0'*64
+            return json.dumps(payload).encode()+b'\n'
+    started=[]
+    def start(cid):started.append(cid);return Process(docker)
+    docker.start_attached=start
+    result=runner.run_stage(**args,docker=docker,clock=docker.clock)
+    assert result['status']==('passed' if mode is None else 'uncovered' if mode=='skip' else 'refused' if mode in ('old_adapter','wrong_nodeids','wrong_runtime','wrong_command') else 'failed')
+    if mode=='wrong_command':assert not started
+    if mode!='rm_timeout':assert docker.removed_ids==[CID]
+    assert (Path(args['run_dir'])/'stage-evidence.json').exists() == (mode is None)

@@ -43,3 +43,9 @@ The obsolete CUDA suite is disabled unless both its exact file is selected and `
 A separate health-probe process must receive a separately reserved sub-budget; the probe and test sub-budgets must sum to no more than the approved batch limit. Release does not refund the cumulative test budget.
 
 设备统一接口的昇腾可选绑定及张量消费主机合同见 `tests/interfaces/test_ascend_profile.py`；替身只验证公开调用形状和拒绝路径，不代表设备实测。
+
+统一设备桥接使用独立入口 `tests/pool/test_pool_device_context_ascend_realcard.py`。它依赖 `device-runtime/manifest.json` 和同目录完整公开 `runtime/` 冻结包；清单 SHA256、公共提交和树身份须与本次 preflight 的 `device_runtime` 相符。组件提交与外部设备包分别登记，完整组合归档用同一 source 摘要绑定。不要把旧直接适配器成绩用于此入口。
+
+有界执行器的 `bridge-lifecycle` 阶段沿用已核映射及健康前置，固定一颗映射目标、2 CPU/4 GiB、64 MiB 累计底座申请、300 秒总时限和只读源挂载。该阶段只选择上述文件的三个生命周期，显式启用值为 `approved-bridge-lifecycle`；来源、目标和查询合同先通过门禁，再延迟导入框架。只做公开事件查询与有限等待，不做全设备同步。调用方初始化并稳定持有框架上下文；框架 current_device 不证明独立 ACL 上下文，context_ok 为未校验。
+
+设备实测结果要求精确三个新入口且零失败、零错误、零跳过。待完成事件未观察到会跳过并记为 uncovered；该结果不产生可复用成功证据。不同原生 Python 流对象不证明不同物理流。释放只交还自有引用，累计额度不返还；清理失败或未完成均不能记为通过。显式收集可用 `pytest tests/pool/test_pool_device_context_ascend_realcard.py --collect-only -q -o addopts= -m realcard`，收集不导入厂商框架。

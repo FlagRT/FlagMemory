@@ -21,7 +21,7 @@ IMAGE_ID="sha256:e13a15d0d02b86e9cd7b1656df3c6b52838c258f270b6b894a91c2b074da5f1
 NODES=("davinci15","davinci_manager","devmm_svm","hisi_hdc")
 OUTPUT_LIMIT=100<<20
 CONTROL_LIMIT=1<<20
-STAGES=("metadata","mapping","health","lifecycle")
+STAGES=("metadata","mapping","health","lifecycle","bridge-lifecycle")
 ID=re.compile(r"^[0-9a-f]{64}$")
 EXPECTED_TESTS=(
     "test_actual_tensor_and_cross_stream_dependency",
@@ -83,8 +83,9 @@ def build_create_argv(*,image,name,run_id,source_dir,stage):
         command+=["health","--mapping","/input/mapping.json","--runtime-evidence","/input/runtime.json",
                   "--byte-limit",str(16<<20),"--timeout-s","30"]
     else:
-        command+=["lifecycle","--mapping","/input/mapping.json","--runtime-evidence","/input/runtime.json",
+        command+=["bridge-lifecycle" if stage=="bridge-lifecycle" else "lifecycle","--mapping","/input/mapping.json","--runtime-evidence","/input/runtime.json",
                   "--health","/input/health.json"]
+    if stage=="bridge-lifecycle": command += ["--device-source","/work/device-runtime/manifest.json"]
     return argv+[image]+command
 
 class Attached:
@@ -279,7 +280,7 @@ def no_conflicting_container(item,mode):
     if "/dev/davinci15" in computes or (mode=="exclusive" and computes):
         raise Refused("overlapping compute authorization or exclusive window conflict")
 
-def verify_created(item,run_id,source,input_dir,stage):
+def verify_created(item,run_id,source,input_dir,stage,identity=None):
     if item.get("Image")!=IMAGE_ID or item.get("Config",{}).get("Labels",{}).get("flagmemory.run_id")!=run_id:
         raise Refused("created container identity or owner label mismatch")
     host=item.get("HostConfig",{})
@@ -300,10 +301,51 @@ def verify_created(item,run_id,source,input_dir,stage):
     wanted=[(str(source),"/work",False),(str(input_dir),"/input",False)]
     if stage!="metadata":wanted.append(("/usr/local/Ascend/driver","/usr/local/Ascend/driver",False))
     if sorted(mounts)!=sorted(wanted):raise Refused("actual read-only mounts differ")
+    if stage=="bridge-lifecycle":
+        config=item.get("Config",{})
+        expected=["-B","/work/tools/ascend_probe.py","bridge-lifecycle","--mapping","/input/mapping.json",
+            "--runtime-evidence","/input/runtime.json","--health","/input/health.json",
+            "--device-source","/work/device-runtime/manifest.json"]
+        if config.get("Entrypoint") != ["python3"] or config.get("Cmd") != expected:
+            raise Refused("actual bridge command differs")
+        env=config.get("Env") or []
+        bound="FLAGMEMORY_DEVICE_MANIFEST_SHA256="+identity["manifest_sha256"] if identity else None
+        if bound is None or sum(v.startswith("FLAGMEMORY_DEVICE_MANIFEST_SHA256=") for v in env) != 1 or bound not in env:
+            raise Refused("actual bridge manifest binding differs")
+
+
+
+BRIDGE_FILE="tests/pool/test_pool_device_context_ascend_realcard.py"
+BRIDGE_NODEIDS=tuple(BRIDGE_FILE+"::"+name for name in EXPECTED_TESTS)
+
+
+def device_source_identity(source, expected):
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"tests/pool"))
+    import device_context_ascend_case as helper
+    if not isinstance(expected,dict): raise Refused("preflight device runtime identity required")
+    try:
+        manifest=helper.load_manifest(source/"device-runtime/manifest.json",expected.get("manifest_sha256"))
+        helper.verify_runtime_origins(source/"device-runtime")
+    except ValueError as exc: raise Refused(str(exc)) from exc
+    identity={key:manifest[key] for key in ("source_repository","source_commit","runtime_tree")}
+    identity["manifest_sha256"]=expected.get("manifest_sha256")
+    if identity != expected: raise Refused("preflight public runtime identity mismatch")
+    return identity
+
+
+def validate_bridge_result(payload, identity):
+    if (payload.get("adapter_kind") != "device-context-ascend-profile"
+        or sorted(payload.get("nodeids",[])) != sorted(BRIDGE_NODEIDS)
+        or payload.get("device_runtime") != identity
+        or type(payload.get("executed")) is not int or payload["executed"] != 3
+        or payload.get("failures") != 0 or payload.get("errors") != 0
+        or type(payload.get("skipped")) is not int or not 0 <= payload["skipped"] <= 3
+        or payload.get("status") != ("uncovered" if payload["skipped"] else "passed")):
+        raise Refused("new bridge result identity, exact cases or coverage mismatch")
 
 def run_stage(*,stage,run_dir,source_dir,image,preflight_path,docker,clock=time.monotonic):
-    start=clock(); total=300 if stage=="lifecycle" else 60
-    deadline=start+total; work_deadline=deadline-(20 if stage=="lifecycle" else 15)
+    start=clock(); total=300 if stage in ("lifecycle","bridge-lifecycle") else 60
+    deadline=start+total; work_deadline=deadline-(20 if stage in ("lifecycle","bridge-lifecycle") else 15)
     run_id=uuid.uuid4().hex; cid=None; attached=None; owner=False; root=None
     result={"schema":1,"stage":stage,"status":"refused","run_id":run_id,"image_id":image,
             "started_at":datetime.now(timezone.utc).isoformat(),"source_sha256":None,
@@ -346,13 +388,16 @@ def run_stage(*,stage,run_dir,source_dir,image,preflight_path,docker,clock=time.
         source_sha=source_digest(source); result["source_sha256"]=source_sha
         data=load_json(preflight_path)
         validate_preflight(data,stage,source_sha,datetime.now(timezone.utc))
+        identity=device_source_identity(source,data.get("device_runtime")) if stage=="bridge-lifecycle" else None
+        if identity is not None: result["device_runtime"]=identity
         target.mkdir(parents=False); root=target
         if hasattr(os,"getuid") and target.stat().st_uid!=os.getuid():raise Refused("run directory owner mismatch")
         input_dir=target/"input"; input_dir.mkdir()
         inputs=data.get("inputs",{})
         required={"metadata":set(),"mapping":{"reviewed-abi.json"},
                   "health":{"mapping.json","runtime.json"},
-                  "lifecycle":{"mapping.json","runtime.json","health.json"}}[stage]
+                  "lifecycle":{"mapping.json","runtime.json","health.json"},
+                  "bridge-lifecycle":{"mapping.json","runtime.json","health.json"}}[stage]
         if not required<=inputs.keys():raise Refused("stage evidence bundle is incomplete")
         allowed={"reviewed-abi.json","mapping.json","runtime.json","health.json"}
         copied=0
@@ -379,6 +424,8 @@ def run_stage(*,stage,run_dir,source_dir,image,preflight_path,docker,clock=time.
         index=argv.index(image)
         extra=["--mount","type=bind,src="+str(input_dir)+",dst=/input,readonly",
                "--env","FLAGMEMORY_SOURCE_SHA256="+source_sha]
+        if stage=="bridge-lifecycle":
+            extra += ["--env","FLAGMEMORY_DEVICE_MANIFEST_SHA256="+identity["manifest_sha256"]]
         argv[index:index]=extra
         if stage=="metadata":
             static=data.get("metadata",{})
@@ -395,7 +442,7 @@ def run_stage(*,stage,run_dir,source_dir,image,preflight_path,docker,clock=time.
         item=inspect(cid)
         owner=item.get("Config",{}).get("Labels",{}).get("flagmemory.run_id")==run_id
         if not owner:raise Refused("created owner label mismatch")
-        verify_created(item,run_id,source,input_dir,stage)
+        verify_created(item,run_id,source,input_dir,stage,identity)
         (target/"inspect.json").write_text(json.dumps(item,indent=2),encoding="utf-8")
         if stage!="metadata":refresh(data)
         # No arbitrary shell, command, Docker option, device, image or retry is accepted.
@@ -420,12 +467,13 @@ def run_stage(*,stage,run_dir,source_dir,image,preflight_path,docker,clock=time.
                 if isinstance(candidate,dict):payload=candidate;break
             except ValueError:pass
         allowed_status=(("uncovered",) if stage=="metadata" else
-                        ("passed","uncovered") if stage=="lifecycle" else ("passed",))
+                        ("passed","uncovered") if stage in ("lifecycle","bridge-lifecycle") else ("passed",))
         expected_stage="metadata" if stage=="metadata" else stage
         if (not payload or payload.get("status") not in allowed_status or payload.get("stage")!=expected_stage
             or payload.get("run_id")!=run_id or payload.get("image_id")!=image
             or payload.get("source_sha256")!=source_sha):
             raise RuntimeError("valid matching stage result missing")
+        if stage=="bridge-lifecycle": validate_bridge_result(payload,identity)
         result["probe"]=payload; result["status"]=payload["status"]; result["reason"]="stage completed"
     except Refused as exc:
         result.update(status="refused",reason=str(exc))
