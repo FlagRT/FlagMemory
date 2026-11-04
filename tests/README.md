@@ -41,3 +41,5 @@ The standalone `tests/pool/test_pool_ascend_realcard.py` has a bounded hardware 
 The obsolete CUDA suite is disabled unless both its exact file is selected and `FLAGMEMORY_ENABLE_LEGACY_CUDA=I_ACCEPT_LEGACY_RISKS` is set. It contains hazardous and outdated tests and is not an Ascend test. Collection does not import the framework.
 
 A separate health-probe process must receive a separately reserved sub-budget; the probe and test sub-budgets must sum to no more than the approved batch limit. Release does not refund the cumulative test budget.
+
+设备统一接口的昇腾可选绑定及张量消费主机合同见 `tests/interfaces/test_ascend_profile.py`；替身只验证公开调用形状和拒绝路径，不代表设备实测。

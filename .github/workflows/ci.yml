@@ -82,8 +82,10 @@ jobs:
           import flagmemory
           import flagmemory.pool
           import flagmemory.caps
+          import flagmemory.adapters.device_context
+          import flagmemory.adapters.ascend
           from importlib.resources import files
           assert files("flagmemory.interfaces").joinpath("pool.pyi").is_file()
-          banned = {"torch", "vllm", "torch_npu", "torch_mlu", "torch_xmlir"}
+          banned = {"runtime", "torch", "vllm", "torch_npu", "torch_mlu", "torch_xmlir", "acl"}
           assert not any(name.split(".")[0] in banned for name in sys.modules)
           PY
