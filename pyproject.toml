@@ -22,6 +22,9 @@ dev = ["pytest>=8", "mypy>=1.8"]
 # docs/ reports/ tests/ 在包外，不入 wheel。
 include = ["flagmemory*", "offload*"]
 
+[tool.setuptools.package-data]
+"flagmemory.interfaces" = ["pool.pyi"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
