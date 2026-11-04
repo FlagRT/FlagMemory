@@ -25,7 +25,7 @@ pytest tests/interfaces -q
 
 **不要运行整批 `pytest -m realcard` 或清空 marker 限制。** 旧池真卡文件缺当前适配器协议、旧租约查询/复用断言失效，并包含按空闲显存倍数进行超量申请的测试；它不是现行可用验收入口，也不能当作昇腾结果。默认排除该模块不代表它已适配。
 
-首次昇腾验证的[独立候选适配器](pool/ascend_test_adapter.py)与[独立测试入口](pool/test_pool_ascend_realcard.py)已实现，本地主机检查已完成；真实设备 API、物理到逻辑映射、单芯片隔离及生命周期尚未验证，设备执行仍需独立批准。须按下方启用条件显式选择该测试文件，并先审阅实际收集名单、资源上限、目标流就绪、池块公开访问及清理步骤。未执行、跳过或未观察到的场景不算通过；主机假后端结果不证明厂商运行时和设备生命周期。
+[独立候选适配器](pool/ascend_test_adapter.py)与[独立测试入口](pool/test_pool_ascend_realcard.py)已有昇腾 910C 单芯片受控验证实例：映射、4096 字节读写健康及三个生命周期用例通过，生命周期无跳过；另有 [模型输入测试](pool/test_onerec_inputs_ascend.py) 验证 OneRec-8B 实际消费池输入并与普通输入数值对照通过。固定源码、环境及取证限制见 [验证实例记录](../docs/validation/2026-11-04-ascend-pool-onerec.md)。这些结果只覆盖该实例，新的设备执行仍须核定目标、窗口及资源范围。须按下方启用条件显式选择该测试文件，并先审阅实际收集名单、资源上限、目标流就绪、池块公开访问及清理步骤。未执行、跳过或未观察到的场景不算通过；主机假后端结果不证明厂商运行时和设备生命周期。
 
 ## 取证与历史材料
 
@@ -36,7 +36,7 @@ pytest tests/interfaces -q
 
 ### Ascend test preparation
 
-The standalone `tests/pool/test_pool_ascend_realcard.py` is a candidate test entry, not a hardware result. It requires an independently verified physical-to-logical mapping, isolation, runtime APIs, nonblocking event query, an exclusive window, resource limits and separate approval. The fixture requires explicit `FLAGMEMORY_ASCEND_ENABLE=approved-mapping-and-bounds`, `FLAGMEMORY_ASCEND_DEVICE`, `FLAGMEMORY_ASCEND_BYTE_LIMIT` (at most 1 GiB cumulative across all tests in the process), and `FLAGMEMORY_ASCEND_QUERY_NONBLOCKING=verified`. Select that file explicitly with `-o addopts= -m realcard`; never infer physical identity from the logical number. Use an external watchdog and bounded output. A skipped pending observation means uncovered, not passed. The quota excludes runtime internal allocations and caching. Cleanup errors are failures.
+The standalone `tests/pool/test_pool_ascend_realcard.py` has a bounded hardware validation instance documented in [the validation record](../docs/validation/2026-11-04-ascend-pool-onerec.md). Its presence does not establish coverage for another configuration. Each execution requires independently verified physical-to-logical mapping, device authorization, runtime APIs, nonblocking event query, a confirmed execution window, resource limits and separate approval. The fixture requires explicit `FLAGMEMORY_ASCEND_ENABLE=approved-mapping-and-bounds`, `FLAGMEMORY_ASCEND_DEVICE`, `FLAGMEMORY_ASCEND_BYTE_LIMIT` (at most 1 GiB cumulative across all tests in the process), and `FLAGMEMORY_ASCEND_QUERY_NONBLOCKING=verified`. Select that file explicitly with `-o addopts= -m realcard`; never infer physical identity from the logical number. Use an external watchdog and bounded output. A skipped pending observation means uncovered, not passed. The quota excludes runtime internal allocations and caching. Cleanup errors are failures.
 
 The obsolete CUDA suite is disabled unless both its exact file is selected and `FLAGMEMORY_ENABLE_LEGACY_CUDA=I_ACCEPT_LEGACY_RISKS` is set. It contains hazardous and outdated tests and is not an Ascend test. Collection does not import the framework.
 
