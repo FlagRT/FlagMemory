@@ -18,10 +18,13 @@ def consume_once(bridge: DeviceContextBridge, allocator: BaseAllocator, *,
     lease = None
     error = None
     try:
+        stream = bridge.current_stream(device_index)
         lease = pool.alloc_on_stream(nbytes, purpose=Purpose.SCRATCH)
         ref = pool.access_block(lease.block_id)
         try:
-            consume(ref)
+            with stream.context():
+                bridge.validate_stream_device(stream, device_index)
+                consume(ref)
         finally:
             del ref
     except BaseException as exc:

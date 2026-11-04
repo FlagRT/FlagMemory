@@ -150,7 +150,10 @@ def test_consumer_failure_still_attempts_destroy_after_free_failure(monkeypatch)
         def destroy_pool(self, **kw): calls.append('destroy'); return report
     monkeypatch.setattr(example, 'create_pool', lambda *a, **kw: Pool())
     def fail(_): raise original
-    with pytest.raises(RuntimeError) as exc: example.consume_once(None, None, tier_spec=None, nbytes=1, consume=fail)
+    from contextlib import nullcontext
+    stream = SimpleNamespace(context=nullcontext)
+    bridge = SimpleNamespace(current_stream=lambda index: stream, validate_stream_device=lambda stream, index: None)
+    with pytest.raises(RuntimeError) as exc: example.consume_once(bridge, None, tier_spec=None, nbytes=1, consume=fail)
     assert exc.value is original and exc.value.destroy_report is report
     assert calls == ['free', 'destroy']
 
@@ -184,3 +187,15 @@ def test_byte_provider_value_error_and_bridge_cause(monkeypatch):
     assert direct.value is error
     with pytest.raises(InvalidArgument) as bridged: p.bridge.device_memory_info(2)
     assert bridged.value.__cause__ is error and b.forbidden == []
+
+def test_consumer_runs_inside_registered_stream_context():
+    from examples.device_context_tensor_pool import consume_once
+    from flagmemory.pool import TierSpec
+    b,t,make = setup(); p = make()
+    seen = []
+    def consume(tensor):
+        assert b.active
+        tensor[0] = 33
+        seen.append(tensor[0])
+    report = consume_once(p.bridge, p.allocator, tier_spec=TierSpec(64,64,1), nbytes=10, consume=consume, device_index=2)
+    assert seen == [33] and not report.completed and not b.active
