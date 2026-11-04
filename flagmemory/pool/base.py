@@ -39,8 +39,11 @@ class BaseAllocator(Protocol):
     绝不在池本体里，因为取空张量要 import 框架，而池本体不许（分层门禁规则 1）。
     """
 
-    def allocate(self, nbytes: int, device_index: int = 0) -> Any:
-        """取一块至少 `nbytes` 字节的底座引用。取不到应抛 `MemoryError`。"""
+    def allocate(self, nbytes: int, device_index: int = 0, *, stream: Any) -> Any:
+        """取至少 nbytes 字节，在给定流分配或建立首次使用就绪依赖。
+
+        返回可直接消费或通过公开适配接口读写的对象，不得仅返回私有映射票据。
+        返回时目标流可安全使用；同步底座可保证已就绪。失败抛 MemoryError。"""
         ...
 
     def release(self, base_ref: Any) -> None:

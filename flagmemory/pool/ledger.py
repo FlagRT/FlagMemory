@@ -15,10 +15,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import count
 from typing import Any, Iterator
 
 from .types import (
-    BlockQuarantined,
     BlockState,
     BlockView,
     OwnershipViolation,
@@ -28,6 +28,9 @@ from .types import (
 )
 
 __all__ = ["Block", "Ledger"]
+
+# Process-local opaque lease identities, never reissued by another pool.
+_LEASE_IDS = count(1)
 
 
 @dataclass
@@ -39,6 +42,7 @@ class Block:
     """
 
     block_id: int
+    storage_id: int
     tier_bytes: int
     nbytes: int
     base_ref: Any
@@ -52,9 +56,10 @@ class Block:
     ticket: Any = None
 
     def view(self) -> BlockView:
-        """对外快照。刻意不含 `base_ref` —— 不让调用方绕过池直接动底座。"""
+        """只读元数据；底座访问必须重新核验当前租约。"""
         return BlockView(
             block_id=self.block_id,
+            storage_id=self.storage_id,
             state=self.state,
             tier_bytes=self.tier_bytes,
             nbytes=self.nbytes,
@@ -78,9 +83,9 @@ class Ledger:
 
     def __init__(self) -> None:
         self._blocks: dict[int, Block] = {}
-        #: 已归还的块标识（不复用，用来区分「非本池块」与「重复归还」）
+        #: 已撤销租约号（用于区分「非本池租约」与「重复归还」）
         self._retired: set[int] = set()
-        self._next_block_id = 1
+        self._leases: dict[int, Block] = {}
         #: 档位 → 可复用块标识（先进先出，便于复现问题）
         self._free: dict[int, list[int]] = {}
         self._quarantine: list[QuarantineRecord] = []
@@ -93,14 +98,23 @@ class Ledger:
 
     def next_block_id(self) -> int:
         """发一个新块标识。**不复用已归还的标识**（设计文档 2.1）。"""
-        block_id = self._next_block_id
-        self._next_block_id += 1
-        return block_id
+        return next(_LEASE_IDS)
 
     def add(self, block: Block) -> None:
-        if block.block_id in self._blocks:
-            raise OwnershipViolation(f"块标识 {block.block_id} 已在账本里，不得重复登记。")
-        self._blocks[block.block_id] = block
+        if block.storage_id in self._blocks:
+            raise OwnershipViolation("底座身份已登记")
+        self._blocks[block.storage_id] = block
+        self._leases[block.block_id] = block
+
+    def renew(self, block: Block) -> None:
+        """Issue a new lease while keeping the storage identity."""
+        self.revoke(block)
+        block.block_id = self.next_block_id()
+        self._leases[block.block_id] = block
+
+    def revoke(self, block: Block) -> None:
+        self._leases.pop(block.block_id, None)
+        self._retired.add(block.block_id)
 
     # —— 查询 ——
 
@@ -112,12 +126,12 @@ class Ledger:
         - 标识在已归还集合里 ⇒ 重复归还（或拿着失效引用继续用）；
         - 标识从没发过 ⇒ 非本池块。
         """
-        block = self._blocks.get(block_id)
+        block = self._leases.get(block_id)
         if block is not None:
             return block
         if block_id in self._retired:
             raise OwnershipViolation(
-                f"块 {block_id} 已归还给底座（重复归还，或拿着失效引用继续用）。"
+                f"租约 {block_id} 已撤销（重复归还，或拿着失效引用继续用）。"
                 f"按 I-1，这是池自己的账本拦下的，没有依赖厂商报错 —— "
                 f"昇腾的裸释放对二次释放静默返回成功，指望厂商报在那一家上会完全失效。"
             )
@@ -126,17 +140,14 @@ class Ledger:
         )
 
     def require_live(self, block_id: int) -> Block:
-        """取块并确认它不在隔离区。隔离是终态，不复用不释放。"""
+        """确认当前在用租约；已归还、隔离或过期凭据不得查询或操作。"""
         block = self.get(block_id)
-        if block.state is BlockState.QUARANTINED:
-            raise BlockQuarantined(
-                f"块 {block_id} 在隔离区（原因：{self.reason_of(block_id) or '未记'}）。"
-                f"隔离是终态：不复用、不释放、只上报。"
-            )
+        if block.state is not BlockState.IN_USE:
+            raise OwnershipViolation(f"租约 {block_id} 已失效，只有在用租约可访问。")
         return block
 
     def __contains__(self, block_id: object) -> bool:
-        return block_id in self._blocks
+        return block_id in self._leases
 
     def __len__(self) -> int:
         return len(self._blocks)
@@ -166,7 +177,7 @@ class Ledger:
             raise OwnershipViolation(
                 f"块 {block.block_id} 状态是 {block.state.value}，不是「可复用」，不得进空闲表。"
             )
-        self._free.setdefault(block.tier_bytes, []).append(block.block_id)
+        self._free.setdefault(block.tier_bytes, []).append(block.storage_id)
 
     def pop_free(self, tier_bytes: int) -> Block | None:
         """从某档空闲表取一块可复用的。表空返回 `None`（不是报错 —— 取不到就去底座拿）。"""
@@ -183,8 +194,8 @@ class Ledger:
     def drop_free(self, block: Block) -> None:
         """把一块从空闲表里摘掉（压力回收 / 碎片整理要交回底座时用）。"""
         queue = self._free.get(block.tier_bytes)
-        if queue and block.block_id in queue:
-            queue.remove(block.block_id)
+        if queue and block.storage_id in queue:
+            queue.remove(block.storage_id)
 
     def free_blocks(self, tier_bytes: int) -> tuple[Block, ...]:
         """某档空闲表里当前真正可复用的块。"""
@@ -206,17 +217,17 @@ class Ledger:
 
     def retire(self, block: Block) -> None:
         """块已交回底座：从账本摘除，标识进已归还集合（不复用）。"""
-        self._blocks.pop(block.block_id, None)
+        self._blocks.pop(block.storage_id, None)
         self.drop_free(block)
-        self._retired.add(block.block_id)
+        self.revoke(block)
         block.state = BlockState.RETURNED
         block.ticket = None
 
     def quarantine(self, block: Block, reason: str, detail: str = "") -> None:
         """转隔离：从空闲表摘掉，留在账本里（隔离量要可查），状态改隔离。"""
         self.drop_free(block)
+        self.revoke(block)
         block.state = BlockState.QUARANTINED
-        block.ticket = None
         self._quarantine.append(
             QuarantineRecord(block_id=block.block_id, reason=reason, detail=detail)
         )

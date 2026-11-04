@@ -102,5 +102,4 @@ def pending_pool(pending_backend: FakeBackend, tier_spec: TierSpec):
         workload=WorkloadType.GENERATIVE,
         tier_spec=tier_spec,
         barrier_timeout_s=0.0,
-        timeout_threshold=2,
     )

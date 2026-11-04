@@ -7,23 +7,17 @@
 向下只有一条依赖线：`flagmemory.caps` 的后端协议。本文件不 import 任何推理框架与厂商运行时
 （`tools/check_layering.py` 规则 1 + 规则 2 静态把关）。
 
-### 流有序分配：两条路，同一套对外语义
+### 当前执行路径
 
-对外接口是「**按流分配 + 后端能力标记**」：
-
-- **自管路（基线，无条件可用）**：池自己记流序、按档维护空闲链、用事件适配器做回收屏障。
-  昆仑芯 P800 无条件走这条（该家原生没有流有序分配：驱动层整族缺失，运行时层那套异步接口
-  是同步实现的空壳）；装了老版本 CANN 的昇腾机器也走这条。
-- **原生路（优化路径）**：后端实现了 `flagmemory.pool.base.StreamOrderedAllocator` 时，
-  取块与还块包到原生原语上。
-
-两条路**对上层暴露同一套接口**，差别只在 `query_capability` 里的
-`native_stream_ordered` 标记与底座取块的实现。自管路的回收策略照三家原生池属性的三个旋钮
-设计（见 `ReusePolicy`），便于两条路行为对齐。
+池按流登记、按档复用，并用事件适配器确认回收寿命。原生流有序优化未启用，
+`query_capability().native_stream_ordered` 为假。首次真实内存验证限定自管张量路径。
+池接口由单线程调用；跨流数据依赖由调用方建立，回收登记不替代数据同步。
 """
 
 from __future__ import annotations
 
+import time
+from itertools import count
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -31,7 +25,7 @@ from ..caps.backend import CapabilityNotDeclared
 from ..caps.capabilities import Capability
 from ..caps.degradation import degradation_for
 from ..caps.query import report as caps_report
-from .barrier import DEFAULT_TIMEOUT_S, BarrierOutcome, RecycleBarrier
+from .barrier import DEFAULT_TIMEOUT_S, BarrierOutcome, BarrierTicket, RecycleBarrier
 from .base import (
     BaseAllocator,
     ContextObserver,
@@ -51,6 +45,7 @@ from .types import (
     CompactResult,
     DegradationNotice,
     DestroyReport,
+    CustodyView,
     DrainResult,
     FormUnavailable,
     FragmentationView,
@@ -71,7 +66,34 @@ from .types import (
     WorkloadType,
 )
 
-__all__ = ["ReusePolicy", "BlockPool", "create_pool"]
+__all__ = ["ReusePolicy", "BlockPool", "create_pool", "list_custodied_pools", "recover_custodied_pool"]
+
+# Explicit process-lifetime custody, without background work or finalizer device calls.
+_CUSTODY_IDS = count(1)
+_CUSTODIED_POOLS: dict[int, BlockPool] = {}
+
+
+def list_custodied_pools() -> tuple[CustodyView, ...]:
+    """Read-only snapshots of closing or quarantined resources held by this process."""
+    return tuple(CustodyView(
+        custody_id=key, closing=pool._closing,
+        in_use_blocks=len(pool._ledger.by_state(BlockState.IN_USE)),
+        pending_blocks=len(pool._ledger.by_state(BlockState.PENDING_RECYCLE)),
+        quarantined_blocks=len(pool._ledger.by_state(BlockState.QUARANTINED)),
+        held_bytes=sum(block.tier_bytes for block in pool._ledger.iter_blocks()),
+        in_use_bytes=pool._ledger.bytes_in_state(BlockState.IN_USE),
+        pending_bytes=pool._ledger.bytes_in_state(BlockState.PENDING_RECYCLE),
+        quarantined_bytes=pool._ledger.bytes_in_state(BlockState.QUARANTINED),
+    ) for key, pool in _CUSTODIED_POOLS.items())
+
+
+def recover_custodied_pool(custody_id: int) -> BlockPool:
+    """Recover a retained pool for queries, returns, draining and closing retries."""
+    try:
+        return _CUSTODIED_POOLS[custody_id]
+    except KeyError:
+        raise InvalidArgument(f"托管记录 {custody_id} 不存在或已安全结束") from None
+
 
 
 @dataclass(frozen=True)
@@ -133,7 +155,6 @@ class BlockPool:
         reuse: ReusePolicy,
         degradations: tuple[DegradationNotice, ...],
         barrier_timeout_s: float,
-        timeout_threshold: int,
     ) -> None:
         self._backend = backend
         self._device_index = device_index
@@ -144,11 +165,13 @@ class BlockPool:
         self._reuse = reuse
         self._degradations = degradations
         self._ledger = Ledger()
-        self._streams = StreamRegistry(backend)
+        self._streams = StreamRegistry(backend, device_index)
         self._barrier = RecycleBarrier(
-            backend, timeout_s=barrier_timeout_s, timeout_threshold=timeout_threshold
+            backend, device_index=device_index, timeout_s=barrier_timeout_s
         )
         self._destroyed = False
+        self._closing = False
+        self._custody_id = next(_CUSTODY_IDS)
         #: 建池时的上下文观测值（有这项能力才有值），归属校验拿它对照
         self._context_token: Any = None
         if isinstance(backend, ContextObserver):
@@ -176,8 +199,8 @@ class BlockPool:
 
     @property
     def native_stream_ordered(self) -> bool:
-        """后端是否提供原生流有序分配原语（能力标记；假则走自管路基线）。"""
-        return isinstance(self._backend, StreamOrderedAllocator)
+        """原生流有序优化是否启用；当前为假，自管路承担完整回收屏障。"""
+        return False  # Native allocation/free completion is not validated for this path.
 
     @property
     def destroyed(self) -> bool:
@@ -188,39 +211,38 @@ class BlockPool:
     # ------------------------------------------------------------------
 
     def destroy_pool(self, *, wait_for_drain: bool = True, timeout_s: float | None = None) -> DestroyReport:
-        """销毁池：排空待回收、交回全部可复用块、放开流登记表的强引用。
+        """关闭池：排空并交回安全资源；全部完成才放开流强引用。
 
         存在 `在用` 块时**不静默释放**（下面可能还在跑），而是抛 `LeakDetected` 并把泄漏
         清单挂在异常的 `.report` 上。排空超时按可恢复态上报（`I-11`），不阻塞。
         """
         self._require_alive()
+        budget = self._barrier.budget(timeout_s)
+        self._closing = True
+        self._retain()
         timed_out = False
         if wait_for_drain:
-            drained = self.drain_stream(timeout_s=timeout_s)
-            timed_out = drained.recoverable_timeout
-
+            timed_out = self.drain_stream(timeout_s=budget).recoverable_timeout
         returned_bytes = 0
         returned_blocks = 0
         for block in self._ledger.by_state(BlockState.REUSABLE):
             returned_bytes += self._return_to_base(block)
             returned_blocks += 1
-
         leaked = tuple(b.view() for b in self._ledger.by_state(BlockState.IN_USE))
-        report = DestroyReport(
-            returned_bytes=returned_bytes,
-            returned_blocks=returned_blocks,
-            quarantined=self._ledger.quarantined_views(),
-            leaked=leaked,
-            drain_timed_out=timed_out,
-        )
-        if leaked:
-            # 泄漏时也要放开流引用（否则流对象跟着池一起漏），但不释放在用块。
+        pending = tuple(b.view() for b in self._ledger.by_state(BlockState.PENDING_RECYCLE))
+        completed = len(self._ledger) == 0
+        if completed:
             self._streams.release_all()
             self._destroyed = True
+            _CUSTODIED_POOLS.pop(self._custody_id, None)
+        report = DestroyReport(
+            returned_bytes=returned_bytes, returned_blocks=returned_blocks,
+            quarantined=self._ledger.quarantined_views(), leaked=leaked,
+            drain_timed_out=timed_out, pending=pending, closing=not completed,
+            completed=completed, custody_id=None if completed else self._custody_id,
+        )
+        if leaked:
             raise LeakDetected(report)
-
-        self._streams.release_all()
-        self._destroyed = True
         return report
 
     # ------------------------------------------------------------------
@@ -239,7 +261,7 @@ class BlockPool:
         失败一律报错（`I-10`）：容量不足不自动缩小请求、不自动换档、不自动阻塞等待；
         定档失败即报错，不自动扩档。
         """
-        self._require_alive()
+        self._require_open()
         if not isinstance(purpose, Purpose):
             raise InvalidArgument(
                 f"用途标签必须取自 Purpose 枚举（六类，见设计文档 4.3），收到 {purpose!r}"
@@ -267,8 +289,9 @@ class BlockPool:
     def _reuse_block(self, block: Block, nbytes: int, owner: int, purpose: Purpose) -> BlockView:
         """复用一块（设计文档 3.2）：改绑流、清空跨流借用集、改写用途标签。"""
         if block.tier_bytes != self._tiers.tier_for(nbytes):  # pragma: no cover - 防御
-            self._ledger.quarantine(block, "档位不匹配", f"空闲表给出 {block.tier_bytes}")
+            self._quarantine(block, "档位不匹配", f"空闲表给出 {block.tier_bytes}")
             raise LedgerInconsistent(f"块 {block.block_id} 档位与请求不匹配，已转隔离。")
+        self._ledger.renew(block)
         block.state = BlockState.ALLOCATING
         block.owner_stream = owner
         block.borrowers.clear()
@@ -296,7 +319,7 @@ class BlockPool:
                 )
             else:
                 assert self._base_allocator is not None  # 建池时已核，见 create_pool
-                base_ref = self._base_allocator.allocate(tier, self._device_index)
+                base_ref = self._base_allocator.allocate(tier, self._device_index, stream=self._streams.get(owner))
         except MemoryError as exc:
             raise CapacityExhausted(
                 nbytes, tier, self.query_watermark(), self._ledger.tier_free(tier)
@@ -308,8 +331,10 @@ class BlockPool:
                 f"池不在单次分配里换形态 —— 请在建池时改形态或改后端声明。"
             ) from exc
 
+        lease_id = self._ledger.next_block_id()
         block = Block(
-            block_id=self._ledger.next_block_id(),
+            block_id=lease_id,
+            storage_id=lease_id,
             tier_bytes=tier,
             nbytes=nbytes,
             base_ref=base_ref,
@@ -333,36 +358,28 @@ class BlockPool:
         **归还不等于可复用**（设计文档 2.2）：调用方看到的「还回去了」只到 `待回收`；
         流序未确认时池绝不把块交给下一个人。
 
-        归属不符 / 重复归还 / 非本池块一律报错并转隔离，且**由池自己的账本拦截**，
-        不依赖厂商报错（`I-1`）。
+        错误、重复或过期租约由账本拒绝，不损伤当前块。当前租约的设备/上下文
+        明确不符才隔离；不依赖厂商报错。
         """
         self._require_alive()
         block = self._ledger.require_live(block_id)
 
-        if block.state is not BlockState.IN_USE:
-            # 重复归还：块已在待回收或空闲表里。转隔离 —— 状态不明的显存不再交给别人。
-            self._ledger.quarantine(
-                block, "重复归还", f"归还时状态为 {block.state.value}"
-            )
-            raise OwnershipViolation(
-                f"块 {block_id} 当前状态是 {block.state.value}，不是「在用」（重复归还）。"
-                f"已转隔离。按 I-1，这是池账本拦下的，没等厂商报。"
-            )
-
         verdict = self.verify_block_ownership(block_id)
         if not verdict.ok:
-            self._ledger.quarantine(block, "归属校验失败", str(verdict))
+            self._quarantine(block, "归属校验失败", str(verdict))
             raise OwnershipViolation(
                 f"块 {block_id} 归属校验不通过（设备 {verdict.device_ok} / "
                 f"上下文 {verdict.context_ok} / 账本 {verdict.ledger_ok}），已转隔离。"
             )
 
         streams = {sid: self._streams.get(sid) for sid in block.related_streams}
+        self._ledger.revoke(block)
+        block.ticket = BarrierTicket()
         try:
-            block.ticket = self._barrier.take_ticket(streams)
+            self._barrier.take_ticket(streams, block.ticket)
         except Exception as exc:
             # 取不到凭据就不能放行：宁可归还失败并上报，也不给一张空凭据。
-            self._ledger.quarantine(block, "取屏障凭据失败", repr(exc))
+            self._quarantine(block, "取屏障凭据失败", repr(exc))
             raise PoolError(
                 f"块 {block_id} 取屏障凭据失败，已转隔离：{exc!r}。"
                 f"池不接受空凭据 —— 那会让还在用的显存立刻变成「可复用」。"
@@ -376,8 +393,8 @@ class BlockPool:
     # ------------------------------------------------------------------
 
     def register_stream(self, stream: Any) -> int:
-        """把一条流登记进池并**强持有到池销毁**（`I-3`），返回池内流标识。"""
-        self._require_alive()
+        """经后端核验设备后登记流，强持有至安全关闭；隔离由进程托管继续持有。"""
+        self._require_open()
         return self._streams.register(stream)
 
     # ------------------------------------------------------------------
@@ -392,7 +409,7 @@ class BlockPool:
 
         边界照抄设计文档：**池不承诺在未声明跨流使用的情况下保护跨流读写。**
         """
-        self._require_alive()
+        self._require_open()
         block = self._ledger.require_live(block_id)
         if block.state is not BlockState.IN_USE:
             raise InvalidArgument(
@@ -416,10 +433,12 @@ class BlockPool:
     def drain_stream(self, *, stream_id: int | None = None, timeout_s: float | None = None) -> DrainResult:
         """推进待回收队列，把已确认完成的块转可复用。
 
-        超时**不等于失败**（`I-11`）：块留在 `待回收`，按可恢复态上报；只有累计超时越过
-        阈值才转隔离。整个过程只轮询事件，不做阻塞等待。
+        零等待只观察；正等待到期仍保持可恢复，不按次数隔离。所有块共享
+        单调时钟截止时间，参数必须有限非负；后端单次 query 必须不阻塞。
         """
         self._require_alive()
+        budget = self._barrier.budget(timeout_s)
+        deadline = time.monotonic() + budget
         if stream_id is not None and not self._streams.has(stream_id):
             raise InvalidArgument(f"流标识 {stream_id} 未登记。")
 
@@ -433,24 +452,19 @@ class BlockPool:
                 continue
             ticket = block.ticket
             if ticket is None:  # pragma: no cover - 防御：待回收必有凭据
-                self._ledger.quarantine(block, "待回收缺屏障凭据")
+                self._quarantine(block, "待回收缺屏障凭据")
                 quarantined.append(block.block_id)
                 continue
 
-            outcome = self._barrier.advance(ticket, timeout_s)
+            outcome = self._barrier.advance(ticket, budget, deadline=deadline)
             if outcome == BarrierOutcome.DONE:
                 promoted_bytes += self._promote(block)
                 promoted_blocks += 1
             elif outcome == BarrierOutcome.FAULT:
-                self._ledger.quarantine(block, "事件适配器报错")
+                self._quarantine(block, "事件适配器报错")
                 quarantined.append(block.block_id)
-            else:
+            elif budget > 0:
                 timed_out.append(block.block_id)
-                if self._barrier.over_threshold(ticket):
-                    self._ledger.quarantine(
-                        block, "屏障超时超阈", f"累计 {ticket.timeouts} 次"
-                    )
-                    quarantined.append(block.block_id)
 
         return DrainResult(
             promoted_blocks=promoted_blocks,
@@ -463,7 +477,6 @@ class BlockPool:
 
     def _promote(self, block: Block) -> int:
         """屏障确认后处置一块：进空闲表，或按 `I-12` / 释放阈值直接交回底座。"""
-        block.ticket = None
         policy = PURPOSE_POLICY[block.purpose]
         if not policy.reusable:
             # I-12：权重与通信缓冲永不进复用池；「未声明」按最保守处理。
@@ -668,7 +681,7 @@ class BlockPool:
         上报降级态 —— **不可静默当作校验通过**。
         """
         self._require_alive()
-        block = self._ledger.get(block_id)
+        block = self._ledger.require_live(block_id)
         degradations: list[DegradationNotice] = []
 
         device_ok = block.device_index == self._device_index
@@ -804,8 +817,33 @@ class BlockPool:
     # ------------------------------------------------------------------
 
     def block_view(self, block_id: int) -> BlockView:
-        """取一块的对外快照（调试与单测用，不在那 15 条里）。"""
-        return self._ledger.get(block_id).view()
+        """取得当前在用租约的元数据快照；已归还租约不再可查。"""
+        self._require_alive()
+        return self._ledger.require_live(block_id).view()
+
+    def access_block(self, block_id: int) -> Any:
+        """取得当前活租约的可消费底座对象；归还后本入口失效。
+
+        调用方必须在归还前完成工作提交与相关流登记。Python 别名不能撤销，
+        归还后不得再用保留的对象读写或排入工作。跨流数据依赖由调用方建立。
+        """
+        self._require_open()
+        block = self._ledger.require_live(block_id)
+        if not self.verify_block_ownership(block_id).ok:
+            raise OwnershipViolation("当前设备/上下文与租约不符，拒绝访问")
+        return block.base_ref
+
+    def _retain(self) -> None:
+        _CUSTODIED_POOLS[self._custody_id] = self
+
+    def _quarantine(self, block: Block, reason: str, detail: str = "") -> None:
+        self._ledger.quarantine(block, reason, detail)
+        self._retain()
+
+    def _require_open(self) -> None:
+        self._require_alive()
+        if self._closing:
+            raise PoolError("池关闭中，不接受新增工作或底座访问。")
 
     def _has_cap(self, cap: Capability) -> bool:
         try:
@@ -829,7 +867,7 @@ class BlockPool:
                 assert self._base_allocator is not None
                 self._base_allocator.release(block.base_ref)
         except Exception as exc:
-            self._ledger.quarantine(block, "底座释放报错", repr(exc))
+            self._quarantine(block, "底座释放报错", repr(exc))
             raise PoolError(
                 f"块 {block.block_id} 交回底座时报错，已转隔离：{exc!r}"
             ) from exc
@@ -853,7 +891,6 @@ def create_pool(
     tier_count: int = DEFAULT_TIER_COUNT,
     reuse: ReusePolicy | None = None,
     barrier_timeout_s: float = DEFAULT_TIMEOUT_S,
-    timeout_threshold: int = 3,
 ) -> BlockPool:
     """在调用方**既有**设备上下文内创建一个池，定下实现形态与档位表。
 
@@ -949,5 +986,4 @@ def create_pool(
         reuse=reuse or ReusePolicy(),
         degradations=tuple(degradations),
         barrier_timeout_s=barrier_timeout_s,
-        timeout_threshold=timeout_threshold,
     )

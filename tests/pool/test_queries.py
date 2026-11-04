@@ -75,7 +75,7 @@ class TestNormal:
         result = handle_pool.reclaim(target_bytes=1 << 20)
         assert result.met_target is True
         assert list(result.released_by_purpose) == [Purpose.SCRATCH]
-        assert handle_pool.block_view(blocks[Purpose.ACTIVATION]).state is BlockState.REUSABLE
+        assert handle_pool._ledger._blocks[blocks[Purpose.ACTIVATION]].state is BlockState.REUSABLE
 
     def test_按压力等级回收(self, handle_pool):
         views = [
@@ -167,7 +167,7 @@ class TestBoundary:
         handle_pool.drain_stream()
         result = handle_pool.compact(tier_bytes=512 << 10)
         assert result.returned_blocks == 1
-        assert handle_pool.block_view(big.block_id).state is BlockState.REUSABLE
+        assert handle_pool._ledger._blocks[big.storage_id].state is BlockState.REUSABLE
 
     def test_空池的视图都能取(self, handle_pool):
         assert handle_pool.query_audit().live_blocks == 0
@@ -182,13 +182,13 @@ class TestBoundary:
         handle_pool.free_block(pending.block_id)        # 停在待回收
         result = handle_pool.compact()
         assert result.returned_blocks == 0
-        assert handle_pool.block_view(in_use.block_id).state is BlockState.IN_USE
-        assert handle_pool.block_view(pending.block_id).state is BlockState.PENDING_RECYCLE
+        assert handle_pool._ledger._blocks[in_use.storage_id].state is BlockState.IN_USE
+        assert handle_pool._ledger._blocks[pending.storage_id].state is BlockState.PENDING_RECYCLE
 
     def test_销毁时排空超时按可恢复态上报(self, pending_pool):
         v = pending_pool.alloc_on_stream(1 << 20, purpose=Purpose.ACTIVATION)
         pending_pool.free_block(v.block_id)
-        report = pending_pool.destroy_pool(timeout_s=0.0)
+        report = pending_pool.destroy_pool(timeout_s=0.001)
         assert report.drain_timed_out is True
         assert report.leaked == ()            # 待回收不算泄漏，在用才算
 
@@ -269,7 +269,7 @@ class TestError:
         with pytest.raises(PoolError) as exc:
             pool.compact()
         assert "转隔离" in str(exc.value)
-        assert pool.block_view(v.block_id).state is BlockState.QUARANTINED
+        assert pool._ledger._blocks[v.storage_id].state is BlockState.QUARANTINED
         assert pool.query_audit().quarantine_reasons == {"底座释放报错": 1}
 
     def test_预算筛选的标签必须取自枚举(self, handle_pool):

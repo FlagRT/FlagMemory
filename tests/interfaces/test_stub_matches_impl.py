@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from flagmemory.pool import BlockPool, create_pool
+from flagmemory.pool import BlockPool, create_pool, list_custodied_pools, recover_custodied_pool
 
 STUB_PATH = (
     Path(__file__).resolve().parent.parent.parent / "flagmemory" / "interfaces" / "pool.pyi"
@@ -43,6 +43,10 @@ FIFTEEN_OPERATIONS = (
     "query_budget",
     "query_capability",
     "query_audit",
+    "access_block",
+    "block_view",
+    "list_custodied_pools",
+    "recover_custodied_pool",
 )
 
 
@@ -96,7 +100,8 @@ def _stub_functions() -> dict[str, ast.FunctionDef]:
 
 
 def _impl_function(name: str):
-    return create_pool if name == "create_pool" else getattr(BlockPool, name)
+    module_functions = {"create_pool": create_pool, "list_custodied_pools": list_custodied_pools, "recover_custodied_pool": recover_custodied_pool}
+    return module_functions[name] if name in module_functions else getattr(BlockPool, name)
 
 
 class TestNormal:
@@ -137,7 +142,7 @@ class TestBoundary:
 
     def test_存根里没有实现里不存在的东西(self):
         for name in _stub_functions():
-            if name == "create_pool":
+            if name in {"create_pool", "list_custodied_pools", "recover_custodied_pool"}:
                 continue
             assert hasattr(BlockPool, name), f"存根里的 {name} 在实现里不存在"
 

@@ -57,7 +57,7 @@ class FakeBaseAllocator:
     fail_release: bool = False
     _next: int = field(default=1, repr=False)
 
-    def allocate(self, nbytes: int, device_index: int = 0) -> Any:
+    def allocate(self, nbytes: int, device_index: int = 0, *, stream: Any) -> Any:
         if nbytes > self.capacity_bytes - self.used_bytes:
             raise MemoryError(
                 f"底座容量不足：请求 {nbytes}，剩余 {self.capacity_bytes - self.used_bytes}"

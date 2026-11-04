@@ -107,7 +107,7 @@ class TestInvariantI1:
         pool.free_block(view.block_id)
         with pytest.raises(OwnershipViolation):
             pool.free_block(view.block_id)
-        assert pool.block_view(view.block_id).state is BlockState.QUARANTINED
+        assert pool._ledger._blocks[view.storage_id].state is BlockState.PENDING_RECYCLE
 
     def test_厂商静默成功时池照样拦下非本池块(self, tier_spec: TierSpec):
         backend = _SilentFreeBackend(
@@ -298,7 +298,7 @@ class TestInvariantI9:
             def __init__(self) -> None:
                 self.live: list[object] = []
 
-            def allocate(self, nbytes: int, device_index: int = 0) -> object:
+            def allocate(self, nbytes: int, device_index: int = 0, *, stream: object) -> object:
                 ref = Opaque()
                 self.live.append(ref)
                 return ref
@@ -384,7 +384,7 @@ class TestInvariantI11:
     def test_超时是可恢复态不抛异常(self, pending_pool):
         view = pending_pool.alloc_on_stream(1 << 20, purpose=Purpose.ACTIVATION)
         pending_pool.free_block(view.block_id)
-        result = pending_pool.drain_stream(timeout_s=0.0)   # 不抛
+        result = pending_pool.drain_stream(timeout_s=0.001)   # 真正等待到期，仍可恢复
         assert result.recoverable_timeout is True
 
 

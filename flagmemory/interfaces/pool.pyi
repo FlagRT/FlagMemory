@@ -26,6 +26,7 @@ from flagmemory.pool.types import (
     CapabilityView,
     CompactResult,
     DestroyReport,
+    CustodyView,
     DrainResult,
     FragmentationView,
     OwnershipVerdict,
@@ -65,7 +66,7 @@ class BlockPool:
     def tier_table(self) -> TierTable: ...
     @property
     def native_stream_ordered(self) -> bool:
-        """后端能力标记：是否有原生流有序分配原语。假则走自管路（基线）。"""
+        """原生优化是否启用；当前为假，使用自管回收屏障。"""
         ...
     @property
     def destroyed(self) -> bool: ...
@@ -74,7 +75,7 @@ class BlockPool:
     def destroy_pool(
         self, *, wait_for_drain: bool = ..., timeout_s: float | None = ...
     ) -> DestroyReport:
-        """排空待回收、交回全部块、放开流强引用；有在用块则抛 `LeakDetected`。"""
+        """进入关闭中；安全排空后才释放流引用。未完成资源托管；在用块抛 LeakDetected。"""
         ...
 
     # —— 3：按流分配 ——
@@ -91,7 +92,7 @@ class BlockPool:
 
     # —— 5：登记流 ——
     def register_stream(self, stream: Any) -> int:
-        """登记并强持有到池销毁（I-3），返回池内流标识。"""
+        """经后端核验设备后登记，强持有至安全关闭或隔离托管终结。"""
         ...
 
     # —— 6：声明跨流使用 ——
@@ -156,6 +157,7 @@ class BlockPool:
 
     # —— 辅助（不在那 15 条里）——
     def block_view(self, block_id: int) -> BlockView: ...
+    def access_block(self, block_id: int) -> Any: ...
 
 # —— 1：建池 ——
 def create_pool(
@@ -169,7 +171,16 @@ def create_pool(
     tier_count: int = ...,
     reuse: ReusePolicy | None = ...,
     barrier_timeout_s: float = ...,
-    timeout_threshold: int = ...,
 ) -> BlockPool:
     """在调用方既有设备上下文内建池（I-4：池不建上下文），定下形态与档位表。"""
+    ...
+
+
+def list_custodied_pools() -> tuple[CustodyView, ...]:
+    """只读托管元数据清单。"""
+    ...
+
+
+def recover_custodied_pool(custody_id: int) -> BlockPool:
+    """找回托管池以查询、归还、排空或重试关闭。"""
     ...

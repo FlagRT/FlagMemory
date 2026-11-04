@@ -152,6 +152,10 @@ class DeviceBackend(Protocol):
         """
         ...
 
+    def validate_stream_device(self, stream: Any, device_index: int) -> None:
+        """核验不透明流属于目标设备；不匹配或无法确认必须抛错。"""
+        ...
+
     def streams_equal(self, left: Any, right: Any) -> bool:
         """两个流是否同一条。各家流对象的 `==` 语义不一致，统一走这个口。"""
         ...

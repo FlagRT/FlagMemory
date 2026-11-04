@@ -49,7 +49,7 @@ class TestNormal:
         handle_pool.free_block(view.block_id)
         result = handle_pool.drain_stream()
         assert result.promoted_blocks == 1
-        assert handle_pool.block_view(view.block_id).state is BlockState.REUSABLE
+        assert handle_pool._ledger._blocks[view.storage_id].state is BlockState.REUSABLE
 
     def test_复用命中同一块且改绑流与标签(self, handle_pool):
         first = handle_pool.alloc_on_stream(1 << 20, purpose=Purpose.ACTIVATION)
@@ -60,7 +60,8 @@ class TestNormal:
         second = handle_pool.alloc_on_stream(
             900 << 10, stream_id=other, purpose=Purpose.KV_CACHE
         )
-        assert second.block_id == first.block_id        # 命中复用，没向底座再拿
+        assert second.storage_id == first.storage_id
+        assert second.block_id != first.block_id
         assert second.owner_stream == other             # 改绑本次请求的流
         assert second.purpose is Purpose.KV_CACHE       # 改写标签
         assert second.borrowers == frozenset()          # 跨流借用集清空
@@ -130,7 +131,8 @@ class TestBoundary:
         first = handle_pool.alloc_on_stream(1 << 20, purpose=Purpose.ACTIVATION)
         handle_pool.free_block(first.block_id)      # 停在待回收，不手动 drain
         second = handle_pool.alloc_on_stream(1 << 20, purpose=Purpose.ACTIVATION)
-        assert second.block_id == first.block_id    # 机会性复用命中
+        assert second.storage_id == first.storage_id
+        assert second.block_id != first.block_id
         assert handle_pool.query_audit().reuse_hits == 1
 
 
@@ -169,14 +171,14 @@ class TestError:
             handle_pool.alloc_on_stream(4096, stream_id=99)
         assert "未登记" in str(exc.value)
 
-    def test_重复归还被池账本拦下并转隔离(self, handle_pool):
+    def test_重复归还被池账本拦下且不损伤待回收块(self, handle_pool):
         """`I-1`：不等厂商报 —— 昇腾的裸释放对二次释放静默返回成功。"""
         view = handle_pool.alloc_on_stream(1 << 20, purpose=Purpose.ACTIVATION)
         handle_pool.free_block(view.block_id)
         with pytest.raises(OwnershipViolation) as exc:
             handle_pool.free_block(view.block_id)
         assert "重复归还" in str(exc.value)
-        assert handle_pool.block_view(view.block_id).state is BlockState.QUARANTINED
+        assert handle_pool._ledger._blocks[view.storage_id].state is BlockState.PENDING_RECYCLE
 
     def test_非本池块报错(self, handle_pool):
         with pytest.raises(OwnershipViolation) as exc:
@@ -190,16 +192,17 @@ class TestError:
         handle_pool.compact()
         with pytest.raises(OwnershipViolation) as exc:
             handle_pool.free_block(view.block_id)
-        assert "已归还给底座" in str(exc.value)
+        assert "已撤销" in str(exc.value)
 
-    def test_隔离块不再被复用也不被释放(self, handle_pool):
+    def test_重复归还不妨碍健康块完成后复用(self, handle_pool):
         view = handle_pool.alloc_on_stream(1 << 20, purpose=Purpose.ACTIVATION)
         handle_pool.free_block(view.block_id)
         with pytest.raises(OwnershipViolation):
-            handle_pool.free_block(view.block_id)          # 转隔离
+            handle_pool.free_block(view.block_id)          # 拒绝失效租约
         reused = handle_pool.alloc_on_stream(1 << 20, purpose=Purpose.ACTIVATION)
-        assert reused.block_id != view.block_id            # 隔离块不进复用
-        assert handle_pool.query_audit().quarantined_blocks == 1
+        assert reused.block_id != view.block_id            # 对外旧租约仍永久失效
+        assert reused.storage_id == view.storage_id
+        assert handle_pool.query_audit().quarantined_blocks == 0
 
     def test_强制句柄形态而后端未声明句柄能力时报错(self, l0_backend_done, tier_spec: TierSpec):
         with pytest.raises(FormUnavailable) as exc:

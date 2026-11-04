@@ -32,7 +32,7 @@ from .base import (
     StreamOrderedAllocator,
 )
 from .ledger import Block, Ledger
-from .pool import BlockPool, ReusePolicy, create_pool
+from .pool import BlockPool, ReusePolicy, create_pool, list_custodied_pools, recover_custodied_pool
 from .streams import DEFAULT_STREAM_ID, StreamRegistry
 from .tiers import DEFAULT_TIER_COUNT, TierSpec, TierTable, resolve_tier_table
 from .types import (
@@ -46,6 +46,7 @@ from .types import (
     CompactResult,
     DegradationNotice,
     DestroyReport,
+    CustodyView,
     DrainResult,
     FormUnavailable,
     FragmentationView,
@@ -71,6 +72,9 @@ from .types import (
 __all__ = [
     # 入口
     "create_pool",
+    "list_custodied_pools",
+    "recover_custodied_pool",
+    "CustodyView",
     "BlockPool",
     "ReusePolicy",
     # 协议口（可选，缺则走已登记的降级路径）

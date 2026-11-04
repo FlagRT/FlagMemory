@@ -25,8 +25,9 @@ DEFAULT_STREAM_ID = 0
 class StreamRegistry:
     """池内流标识 ↔ 流对象。标识对外，流对象只在池内，且只强引用。"""
 
-    def __init__(self, backend: Any) -> None:
+    def __init__(self, backend: Any, device_index: int) -> None:
         self._backend = backend
+        self._device_index = device_index
         # 刻意是普通 dict：强引用，保持到池销毁（I-3）。不是 WeakValueDictionary。
         self._by_id: dict[int, Any] = {}
         self._next_id = DEFAULT_STREAM_ID + 1
@@ -37,6 +38,7 @@ class StreamRegistry:
         """登记一条流并强持有，返回池内流标识。已登记过的返回原标识。"""
         if stream is None:
             raise InvalidArgument("流对象不能是 None；不给流请省略参数，池会绑默认流。")
+        self._validate(stream)
         existing = self.find(stream)
         if existing is not None:
             return existing
@@ -49,8 +51,15 @@ class StreamRegistry:
         """把某条流登记成默认流（建池时用当前流占住 `DEFAULT_STREAM_ID`）。"""
         if stream is None:
             raise InvalidArgument("默认流对象不能是 None。")
+        self._validate(stream)
         self._by_id[DEFAULT_STREAM_ID] = stream
         return DEFAULT_STREAM_ID
+
+    def _validate(self, stream: Any) -> None:
+        try:
+            self._backend.validate_stream_device(stream, self._device_index)
+        except Exception as exc:
+            raise InvalidArgument(f"无法确认流属于设备 {self._device_index}: {exc}") from exc
 
     # —— 查询 ——
 

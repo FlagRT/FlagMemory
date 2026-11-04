@@ -37,6 +37,7 @@ __all__ = [
     "CapabilityView",
     "AuditView",
     "DestroyReport",
+    "CustodyView",
     # 异常
     "PoolError",
     "InvalidArgument",
@@ -196,9 +197,10 @@ class DegradationNotice:
 
 @dataclass(frozen=True)
 class BlockView:
-    """块的对外快照（不暴露底座引用，避免调用方绕过池直接动底座）。"""
+    """租约元数据快照；block_id 每次租用更新，storage_id 标识底座。"""
 
     block_id: int
+    storage_id: int
     state: BlockState
     tier_bytes: int
     nbytes: int
@@ -377,6 +379,25 @@ class DestroyReport:
     quarantined: tuple[BlockView, ...]
     leaked: tuple[BlockView, ...]
     drain_timed_out: bool
+    pending: tuple[BlockView, ...]
+    closing: bool
+    completed: bool
+    custody_id: int | None
+
+
+@dataclass(frozen=True)
+class CustodyView:
+    """进程级安全托管清单，不暴露底座对象。"""
+
+    custody_id: int
+    closing: bool
+    in_use_blocks: int
+    pending_blocks: int
+    quarantined_blocks: int
+    held_bytes: int
+    in_use_bytes: int
+    pending_bytes: int
+    quarantined_bytes: int
 
 
 # ======================================================================

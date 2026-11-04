@@ -13,6 +13,7 @@ from flagmemory.caps.fake import FakeStream
 from flagmemory.pool import (
     BlockState,
     InvalidArgument,
+    OwnershipViolation,
     PoolError,
     PoolForm,
     Purpose,
@@ -76,7 +77,7 @@ class TestNormal:
         assert len(pending.borrowers) == 2
         result = handle_pool.drain_stream()
         assert result.promoted_blocks == 1
-        assert handle_pool.block_view(view.block_id).state is BlockState.REUSABLE
+        assert handle_pool._ledger._blocks[view.storage_id].state is BlockState.REUSABLE
 
     def test_按流推进只动相关流上的块(self, handle_pool):
         stream_a = handle_pool.register_stream(FakeStream(stream_id=21))
@@ -88,8 +89,8 @@ class TestNormal:
 
         result = handle_pool.drain_stream(stream_id=stream_a)
         assert result.promoted_blocks == 1
-        assert handle_pool.block_view(block_a.block_id).state is BlockState.REUSABLE
-        assert handle_pool.block_view(block_b.block_id).state is BlockState.PENDING_RECYCLE
+        assert handle_pool._ledger._blocks[block_a.storage_id].state is BlockState.REUSABLE
+        assert handle_pool._ledger._blocks[block_b.storage_id].state is BlockState.PENDING_RECYCLE
 
 
 class TestBoundary:
@@ -99,21 +100,21 @@ class TestBoundary:
         """`I-11`：超时按可恢复态上报，块留在待回收，不抛异常。"""
         view = pending_pool.alloc_on_stream(1 << 20, purpose=Purpose.ACTIVATION)
         pending_pool.free_block(view.block_id)
-        result = pending_pool.drain_stream(timeout_s=0.0)
+        result = pending_pool.drain_stream(timeout_s=0.001)
         assert result.recoverable_timeout is True
         assert result.promoted_blocks == 0
         assert result.still_pending == 1
         assert view.block_id in result.timed_out_blocks
-        assert pending_pool.block_view(view.block_id).state is BlockState.PENDING_RECYCLE
+        assert pending_pool._ledger._blocks[view.storage_id].state is BlockState.PENDING_RECYCLE
 
-    def test_超时累计越过阈值才转隔离(self, pending_pool):
+    def test_零等待观察不隔离健康工作(self, pending_pool):
         view = pending_pool.alloc_on_stream(1 << 20, purpose=Purpose.ACTIVATION)
         pending_pool.free_block(view.block_id)
-        first = pending_pool.drain_stream(timeout_s=0.0)
-        assert first.quarantined_blocks == ()                 # 阈值 2，第一次不隔离
-        second = pending_pool.drain_stream(timeout_s=0.0)
-        assert view.block_id in second.quarantined_blocks     # 第二次越过阈值
-        assert pending_pool.block_view(view.block_id).state is BlockState.QUARANTINED
+        for _ in range(5):
+            result = pending_pool.drain_stream(timeout_s=0.0)
+            assert result.quarantined_blocks == ()
+            assert not result.recoverable_timeout
+        assert pending_pool.query_audit().pending_depth == 1
 
     def test_没有待回收时推进是空操作(self, handle_pool):
         result = handle_pool.drain_stream()
@@ -162,15 +163,14 @@ class TestError:
         with pytest.raises(PoolError) as exc:
             pool.free_block(view.block_id)
         assert "空凭据" in str(exc.value)
-        assert pool.block_view(view.block_id).state is BlockState.QUARANTINED
+        assert pool._ledger._blocks[view.storage_id].state is BlockState.QUARANTINED
 
     def test_跨流声明的块必须在用(self, handle_pool):
         view = handle_pool.alloc_on_stream(1 << 20, purpose=Purpose.ACTIVATION)
         handle_pool.free_block(view.block_id)
         other = handle_pool.register_stream(FakeStream(stream_id=9))
-        with pytest.raises(InvalidArgument) as exc:
+        with pytest.raises(OwnershipViolation):
             handle_pool.declare_cross_stream_use(view.block_id, other)
-        assert "只有「在用」" in str(exc.value)
 
     def test_跨流声明的流必须已登记(self, handle_pool):
         view = handle_pool.alloc_on_stream(1 << 20, purpose=Purpose.ACTIVATION)

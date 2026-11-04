@@ -127,6 +127,12 @@ class FakeBackend:
         self._check_device(device_index)
         return FakeStream(device_index=device_index, stream_id=0)
 
+    def validate_stream_device(self, stream: FakeStream, device_index: int) -> None:
+        self._require(Capability.STREAM)
+        self._check_device(device_index)
+        if not isinstance(stream, FakeStream) or stream.device_index != device_index:
+            raise ValueError("流不属于目标设备")
+
     def streams_equal(self, left: FakeStream, right: FakeStream) -> bool:
         self._require(Capability.STREAM)
         return (left.device_index, left.stream_id) == (right.device_index, right.stream_id)
