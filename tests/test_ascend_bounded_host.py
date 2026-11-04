@@ -465,3 +465,40 @@ def test_new_bridge_result_and_cleanup_are_bound_to_exact_stage(bridge_run,mode)
     if mode=='wrong_command':assert not started
     if mode!='rm_timeout':assert docker.removed_ids==[CID]
     assert (Path(args['run_dir'])/'stage-evidence.json').exists() == (mode is None)
+
+
+def test_standalone_source_validator_without_installed_component_or_repo_path(bridge_run,tmp_path):
+    """Synthetic public tree tests the real standalone host import boundary.
+
+    The child uses the same synthetic tree override as bridge_run; it does not
+    replace the validator or install the component. Real frozen-export identity
+    is separately checked when preparing an execution bundle.
+    """
+    import subprocess
+    args,identity=bridge_run
+    script=r'''
+import importlib.util,json,runpy,sys
+from pathlib import Path
+assert importlib.util.find_spec('flagmemory') is None
+runner_path=Path(sys.argv[1])
+assert str(runner_path.parents[1]) not in sys.path
+namespace=runpy.run_path(str(runner_path),run_name='isolated_host_cli')
+sys.path.insert(0,str(runner_path.parents[1]/'tests/pool'))
+import device_context_ascend_case as helper
+expected=json.loads(sys.argv[3])
+helper.RUNTIME_TREE=expected['runtime_tree']  # CPU-only synthetic fixture tree
+actual=namespace['device_source_identity'](Path(sys.argv[2]),expected)
+assert actual==expected
+assert not any(name=='flagmemory' or name.startswith('flagmemory.') or name=='runtime' or name.startswith('runtime.') or name=='torch' or name.startswith('torch.') or name=='torch_npu' or name.startswith('torch_npu.') for name in sys.modules)
+try:
+    namespace['device_source_identity'](Path(sys.argv[2]),dict(expected,manifest_sha256='0'*64))
+except namespace['Refused']:
+    pass
+else:
+    raise AssertionError('bad source manifest accepted')
+print(json.dumps(actual,sort_keys=True))
+'''
+    result=subprocess.run([sys.executable,'-I','-S','-B','-c',script,str(ROOT/'tools/run_ascend_bounded.py'),args['source_dir'],json.dumps(identity)],
+        cwd=tmp_path,stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=15)
+    assert result.returncode==0,result.stdout+'\n'+result.stderr
+    assert json.loads(result.stdout)==identity

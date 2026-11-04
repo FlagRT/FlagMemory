@@ -11,7 +11,10 @@ from pathlib import Path, PurePosixPath
 import sys
 import time
 from contextlib import contextmanager
-from flagmemory.adapters.ascend import AscendProfile, make_ascend_profile
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from flagmemory.adapters.ascend import AscendProfile
 
 RUNTIME_COMMIT = '719de8cbaea75691b38ad87d6706a949e045b892'
 RUNTIME_TREE = '3a456b091d11fd7b30bb573be28ec013be80fa1f'
@@ -141,6 +144,8 @@ class ObservedAllocator:
 
 
 def make_case_profile(torch_module, *, backend, stream_type, event_type, device_index: int, byte_limit: int) -> AscendProfile:
+    from flagmemory.adapters.ascend import AscendProfile, make_ascend_profile
+
     profile=make_ascend_profile(torch_module=torch_module,backend=backend,stream_type=stream_type,
         event_type=event_type,device_index=device_index,byte_limit=byte_limit)
     return AscendProfile(ObservedBridge(profile.bridge),ObservedAllocator(profile.allocator),profile.new_stream)
