@@ -16,7 +16,7 @@
 #
 # 哪些契约尚未实现、以及未实现的理由，见 `docs/impl/11-28-分级块池与流有序分配.md`。
 
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from flagmemory.pool.base import BaseAllocator
 from flagmemory.pool.tiers import TierSpec, TierTable
@@ -133,7 +133,9 @@ class BlockPool:
         pressure: PressureLevel | None = ...,
         allow_tier_offload: bool = ...,
     ) -> ReclaimResult:
-        """进程内回收，如实返回实际释放量；不做设备级恢复（I-5）。"""
+        """进程内回收，如实返回实际释放量；登记换出回调后允许分层换出：先调回调一次、
+        回报计入 ReclaimResult.tier_offloaded_bytes、未登记仍报 NotWired；
+        不做设备级恢复（I-5）。"""
         ...
 
     # —— 12：归属校验 ——
@@ -172,8 +174,11 @@ def create_pool(
     tier_count: int = ...,
     reuse: ReusePolicy | None = ...,
     barrier_timeout_s: float = ...,
+    offload_callback: Callable[[BlockPool], int] | None = ...,
 ) -> BlockPool:
-    """在调用方既有设备上下文内建池（I-4：池不建上下文），定下形态与档位表。"""
+    """在调用方既有设备上下文内建池（I-4：池不建上下文），定下形态与档位表。
+    offload_callback 登记分层换出回调：None/未给 = 未接线，
+    reclaim(allow_tier_offload=True) 对未接线的池报 NotWired。"""
     ...
 
 
