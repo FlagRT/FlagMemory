@@ -48,6 +48,16 @@ def validate_sequence_gate(config):
     return config
 
 
+def build_cpu_inputs(runtime,seed):
+    inputs=[]
+    for length in sequence_lengths():
+        # A contiguous [1,L] narrow can retain its larger parent batch stride.
+        # Materialize a canonical one-dimensional copy before adding batch=1.
+        ids=seed.repeat(1,(length+18)//19).narrow(1,0,length).flatten().clone().view(1,length)
+        inputs.append((ids,runtime.ones_like(ids)))
+    return inputs
+
+
 def load_model_pair(transformers,model_path,dtype):
     tokenizer=transformers.AutoTokenizer.from_pretrained(model_path,local_files_only=True,trust_remote_code=False)
     model=transformers.AutoModelForCausalLM.from_pretrained(model_path,local_files_only=True,
@@ -110,10 +120,7 @@ def test_onerec_continuous_inputs_reuse_and_reclaim(sequence_gate):
         if (seed.dtype!=torch.int64 or tuple(seed.shape)!=(1,19) or seed.device.type!='cpu'
             or not seed.is_contiguous() or int(seed.min())<0
             or int(seed.max())>=model.get_input_embeddings().num_embeddings): raise ValueError('invalid fixed seed token range')
-        cpu_inputs=[]
-        for length in sequence_lengths():
-            ids=seed.repeat(1,(length+18)//19).narrow(1,0,length).contiguous()
-            cpu_inputs.append((ids,torch.ones_like(ids)))
+        cpu_inputs=build_cpu_inputs(torch,seed)
         stream=profile.new_stream()
         pool=create_pool(profile.bridge,device_index=device,form=PoolForm.TENSOR,base_allocator=profile.allocator,
             tier_spec=TierSpec(8<<20,8<<20,2),reuse=ReusePolicy(opportunistic=False),barrier_timeout_s=10)
