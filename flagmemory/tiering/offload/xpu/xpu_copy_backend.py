@@ -10,6 +10,15 @@ upstream worker's get_finished().
 Device notes (kunlun XMLIR, torch.cuda compatible namespace):
 - Streams/events are torch.cuda.* — W1 verified plain Stream creation, D2H
   copy_(non_blocking=True) + synchronize, and pin_memory all work.
+- torch.xpu.* is NOT available on this stack (importing it raises "Torch not
+  compiled with XPU enabled"). The actual backend is torch_xmlir's symbol
+  rewrite: at import time it maps torch.cuda.* onto XPU (prints
+  "SYMBOL_REWRITE torch success"). Monitoring / accounting code must
+  therefore use torch.cuda.* APIs (torch.cuda.memory_stats etc.), never
+  torch.xpu.*. Instance anchor (2026-11-05 single-card run; re-probe when
+  the stack changes): image flagrt/kunlun-operator-runtime:2.0.0
+  (id cac5ddae5f62), torch 2.9.0+cu129, driver stack 1.0:2.43:1.86.5.3.
+  Evidence record: 指挥台仓 inbox/取证-昆仑芯P800分配粒度基数-20261105.md.
 - No batch-memcpy driver API is reachable from Python (cuda-python is absent
   — stock death point P-2), so each block is copied with
   Tensor.copy_(non_blocking=True) on the transfer stream. Correctness-first;
