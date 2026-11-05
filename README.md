@@ -10,7 +10,7 @@
 | `flagmemory/caps/` | 统一能力协议、分级与降级查询 |
 | `flagmemory/tiering/offload/` | 框架绑定的三套 KV→Host 卸载适配器；尚未成为池的业务消费方 |
 | `flagmemory/profiling/probes/` | 随包分发的脚本集，按各目录说明调用，不作为稳定模块 API |
-| `flagmemory/interfaces/` | 类型存根及接口文档；接口语言面为 Proposed |
+| `flagmemory/interfaces/` | 类型存根及接口文档；语言面已定稿（ADR-0015，2026-11-05）：类型存根 + 接口文档，C 头触发式 |
 | `docs/design/` | 池与分层存储设计；通用分层管理器和原生优化尚未实现 |
 
 池本体不导入推理框架；底座由外部注入，芯片差异经能力层处理。当前原生流有序标记为假；首次芯片验证只针对显式张量级自管路径。SDK 头文件/符号调查不等于运行验证。池没有换出回调，允许分层换出的回收请求明确抛 `NotWired`。

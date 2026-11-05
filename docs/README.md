@@ -5,7 +5,7 @@
 | [显存池概念与设计基础](design/显存池概念与设计基础.md) | 分层、租约与底座身份、流序和操作契约；当前原生优化关闭 |
 | [分层存储概念与设计基础](design/分层存储概念与设计基础.md) | 放置与搬运的后续设计；通用管理器及池回调尚未接线 |
 | [分级块池与流有序分配实现说明](impl/11-28-分级块池与流有序分配.md) | 当前导入、建池、消费、关闭托管、限制及检查入口 |
-| [池接口文档](../flagmemory/interfaces/接口文档-显存池对外接口.md) / [类型存根](../flagmemory/interfaces/pool.pyi) | 现行 Python 契约，接口语言面仍 Proposed |
+| [池接口文档](../flagmemory/interfaces/接口文档-显存池对外接口.md) / [类型存根](../flagmemory/interfaces/pool.pyi) | 现行 Python 契约；语言面已定稿（ADR-0015）：类型存根 + 接口文档，C 头触发式 |
 | [测试说明](../tests/README.md) | 主机检查、真卡入口限制及取证方式 |
 | [采集协议](PROFILE-PROTOCOL.md) | 实测数据口径与配对要求 |
 | [改造说明](refactor/) | 组件落点与包结构等过程说明 |
