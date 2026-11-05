@@ -1,0 +1,91 @@
+# 持续集成（ADR-0014 §3.5 第 2 件改造的「持续集成」那一项）。
+#
+# 刻意**不装 torch / vLLM，也不碰真卡**：
+#   - 本包零依赖，四家芯片容器里的 torch / vLLM 版本互不兼容，CI 里装不出一套「正确」的；
+#   - 池本体与能力层本来就不许碰框架（分层门禁静态把关），所以无框架环境正是它们该跑的环境；
+#   - 真卡用例标了 `realcard`，被 pytest 的 `addopts = "-m 'not realcard'"` deselect，
+#     要在带卡机器的宿主栈容器内用 `pytest -m realcard` 跑（见 tests/README.md）。
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 下限对齐 pyproject 的 requires-python = ">=3.10"；上限取一个主流档。
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 装本包与开发依赖（不含 torch / vLLM）
+        run: pip install -e ".[dev]"
+
+      - name: 分层门禁（池本体与能力层不碰框架、方向只许向下）
+        run: python tools/check_layering.py
+
+      - name: 接口存根过类型检查
+        # 按显存池设计文档第五节：类型存根充当招标口径的「接口头文件」，理由之一是**可检验性**
+        # ——「类型存根能被类型检查器与单测直接校验，属可持续门禁」。这一步是那句话的前半句；
+        # 后半句（存根与实现的形参一致）由下一步单测里的 tests/interfaces/ 钉。
+        # --follow-imports=silent：这个门禁只判存根本身，不替其他模块做全仓严格体检。
+        run: mypy --strict --follow-imports=silent flagmemory/interfaces/pool.pyi
+
+      - name: 单测（真卡用例自动 deselect）
+        run: pytest
+
+  distribution:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: "3.10"
+            build-backend: "setuptools==68.0.0"
+          - python-version: "3.12"
+            build-backend: "setuptools>=68"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install build and contract-check tools
+        env:
+          BUILD_BACKEND_REQUIREMENT: ${{ matrix.build-backend }}
+        run: python -m pip install build wheel packaging "$BUILD_BACKEND_REQUIREMENT"
+
+      - name: Build and check wheel and sdist
+        run: |
+          python -m build --wheel --sdist --no-isolation
+          python tools/check_distribution.py dist/*.whl dist/*.tar.gz
+
+      - name: Import installed wheel away from source
+        run: |
+          python -m venv artifact-smoke
+          artifact-smoke/bin/python -m pip install --no-deps dist/*.whl
+          cd /tmp
+          "$GITHUB_WORKSPACE/artifact-smoke/bin/python" -I - <<'PY'
+          import sys
+          import flagmemory
+          import flagmemory.pool
+          import flagmemory.caps
+          import flagmemory.adapters.device_context
+          import flagmemory.adapters.ascend
+          from importlib.resources import files
+          assert files("flagmemory.interfaces").joinpath("pool.pyi").is_file()
+          banned = {"runtime", "torch", "vllm", "torch_npu", "torch_mlu", "torch_xmlir", "acl"}
+          assert not any(name.split(".")[0] in banned for name in sys.modules)
+          PY

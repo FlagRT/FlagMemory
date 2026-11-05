@@ -5,3 +5,21 @@ __pycache__/
 build/
 dist/
 /tmp/
+.pytest_cache/
+uv.lock
+
+# --- 实测证据不入本仓（ADR-0014 §3.5 第 3 条：证据与组件代码分仓） ---
+# 本仓只放组件代码、接口头文件与单测；实测原始数据与结果报告在公共协作仓
+# runtime-team 的 dev/memory/{docs/goals,evidence}/ 下，本仓 reports/ 只留索引。
+# reports/ 下只许有索引与子目录说明
+reports/**/*.json
+reports/**/*.csv
+reports/**/*.txt
+reports/**/*.tsv
+# 实测日志与采样产物（全仓范围：单测产物也不入仓）
+*.log
+*.jsonl
+# 单测与门禁自己的产物（第 2 件改造落地后由那边维护；此处先占位拦住）
+.pytest_cache/
+htmlcov/
+.coverage

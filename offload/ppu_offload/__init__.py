@@ -1,8 +1,30 @@
-# KV->Host 卸载 connector（PPU ZW810E / vllm-plugin-fl 0.24 栈）。
-# 栈外模块，经 kv_connector_module_path=offload.ppu_offload 加载。
-# 源：vLLM 0.24 vendor SimpleCPUOffloadConnector 六文件 vendor+补丁
-# （P-0 元组容忍 / P-1 流优先级兜底 / P-2 逐块 copy_ 替代批量 cuMemcpy / P-3 pin 兜底）。
-# 工厂按 getattr(module, kv_connector名字) 取类，本包必须导出 PpuSimpleCPUOffloadConnector。
-from .connector import PpuSimpleCPUOffloadConnector
+"""兼容别名 offload.ppu_offload → flagmemory.tiering.offload.ppu（0.2.x 有效，0.3.0 移除）。
 
-__all__ = ["PpuSimpleCPUOffloadConnector"]
+vLLM 的 connector 工厂按 getattr(module, kv_connector名字) 取类，所以本模块只需在
+取属性时把类递出去；import 本模块本身不触发栈依赖。
+"""
+
+import warnings
+
+_NEW = "flagmemory.tiering.offload.ppu"
+_EXPORTS = ("PpuSimpleCPUOffloadConnector",)
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name):
+    if name not in _EXPORTS:
+        raise AttributeError(name)
+    warnings.warn(
+        "offload.ppu_offload 是兼容别名，0.3.0 起移除；"
+        f"请把 kv_connector_module_path 与 import 改为 {_NEW}。",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    from importlib import import_module
+
+    return getattr(import_module(_NEW), name)
+
+
+def __dir__():
+    return sorted(__all__)

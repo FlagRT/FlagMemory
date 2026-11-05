@@ -1,9 +1,16 @@
-# docs/ —— 指针与操作件
+# 文档入口
 
-**正式报告不入本仓**：报告走公共仓 dev-1.0 验收主线，路径
-`dev/memory/docs/goals/proto-910c-202610/`（merge 5f880a1，2026-10-14）：
+| 文档 | 用途与边界 |
+|---|---|
+| [显存池概念与设计基础](design/显存池概念与设计基础.md) | 分层、租约与底座身份、流序和操作契约；当前原生优化关闭 |
+| [分层存储概念与设计基础](design/分层存储概念与设计基础.md) | 放置与搬运的后续设计；通用管理器及池回调尚未接线 |
+| [分级块池与流有序分配实现说明](impl/11-28-分级块池与流有序分配.md) | 当前导入、建池、消费、关闭托管、限制及检查入口 |
+| [池接口文档](../flagmemory/interfaces/接口文档-显存池对外接口.md) / [类型存根](../flagmemory/interfaces/pool.pyi) | 现行 Python 契约，接口语言面仍 Proposed |
+| [测试说明](../tests/README.md) | 主机检查、真卡入口限制及取证方式 |
+| [采集协议](PROFILE-PROTOCOL.md) | 实测数据口径与配对要求 |
+| [改造说明](refactor/) | 组件落点与包结构等过程说明 |
 
-1. 《双栈显存画像对照：vllm-ascend vs vllm-plugin-FL（910C，2026-10-12）》
-2. 《KV→Host 卸载 W2 闭环 + W3 开关对照（910C，2026-10-14）》
+现有画像和卸载报告的验收主线在公共仓 `FlagRT/runtime-team` 的 `dev/memory/docs/goals/proto-910c-202610/`，包括双栈显存画像对照与 KV→Host 卸载闭环。历史 `reports/` 在本仓只保留索引；历史证据在协作仓个人汇总分支待公共合入，入口见 [证据索引](../reports/INDEX.md)。三栈卸载报告不代表新池真卡验证。
 
-本目录后续只放操作件：runbook、探针说明、env 基线档案（env/v1 起按 ENV-SPEC 归档）。
+
+当前池阶段验收、固定源码及限制见 [公开摘要](validation/2026-11-05-pool-stage.md)。
