@@ -35,6 +35,6 @@ python tools/check_layering.py
 
 默认排除 `realcard` 用例。**不要直接运行全部 `-m realcard`**：旧 CUDA 兼容池测试的适配器和断言仍未适配当前协议，并含按空闲显存倍数申请的用例。独立候选适配器与测试入口已有昇腾 910C 单芯片受控验证实例：映射、4096 字节读写健康及三个生命周期用例通过；OneRec-8B 的单次池输入消费与普通输入数值对照通过。具体身份、结果及限制见 [验证实例记录](docs/validation/2026-11-04-ascend-pool-onerec.md)，环境选择以运行时协调仓的 [现行锁定声明](https://github.com/FlagRT/runtime-team/blob/dev-1.0/dev/stack.lock.910c.v4.yaml) 为准。这不代表所有配置、生产接入或模型全部显存已验证；新的设备执行仍需核定当时的目标、窗口与资源范围。须显式选择独立测试文件并遵守资源上限；入口与启用条件见 [测试说明](tests/README.md)。
 
-探针及历史实测材料的口径见 [采集协议](docs/PROFILE-PROTOCOL.md)。代码/证据分家尚未收口，`reports/` 仍含历史材料；旧真卡取证逻辑默认仅打印，显式指定仓外路径才写文件。不得把未执行或被排除的用例计为通过。
+探针及历史实测材料的口径见 [采集协议](docs/PROFILE-PROTOCOL.md)。`reports/` 只保留历史证据索引，历史资料在协作仓个人汇总线待公共合入；旧真卡取证逻辑默认仅打印，显式指定仓外路径才写文件。不得把未执行或被排除的用例计为通过。
 
 设计入口与证据指针见 [文档索引](docs/README.md)，方向状态见 [STATUS.md](STATUS.md)。
