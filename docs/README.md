@@ -10,6 +10,7 @@
 | [采集协议](PROFILE-PROTOCOL.md) | 实测数据口径与配对要求 |
 | [改造说明](refactor/) | 组件落点与包结构等过程说明 |
 
-现有画像和卸载报告的验收主线在公共仓 `FlagRT/runtime-team` 的 `dev/memory/docs/goals/proto-910c-202610/`，包括双栈显存画像对照与 KV→Host 卸载闭环。历史 `reports/` 材料仍留在本仓，证据迁移尚未收口；不要据此宣称本仓只剩证据索引，也不要将三栈卸载报告外推为池真卡验证。
+现有画像和卸载报告的验收主线在公共仓 `FlagRT/runtime-team` 的 `dev/memory/docs/goals/proto-910c-202610/`，包括双栈显存画像对照与 KV→Host 卸载闭环。历史 `reports/` 在本仓只保留索引；历史证据在协作仓个人汇总分支待公共合入，入口见 [证据索引](../reports/INDEX.md)。三栈卸载报告不代表新池真卡验证。
 
-SDK 只读原语补探的登记处是指挥台仓 `flag_RT/inbox/调研-四芯片SDK显存原语面补探-20261103.md`，用于核对头文件/导出符号强度与未决项，不代表后端接入或运行通过。
+
+当前池阶段验收、固定源码及限制见 [公开摘要](validation/2026-11-05-pool-stage.md)。
