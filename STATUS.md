@@ -17,7 +17,7 @@
 
 ## 验收与限制
 
-固定源身份、715主机通过/1旧跳过/11真卡未选，以及三生命周期和连续模型的精确边界见 [组件阶段公开验收摘要](https://github.com/FlagRT/FlagMemory/blob/xliu969/pool-impl/docs/validation/2026-11-05-pool-stage.md)。最终源为 `eef16077fb9d5982cfd136e54570ac17888b7757`，新桥接设备成绩源为 `a51ec5c00505eb6a816fcdeb57b8ccdb8c3357c5`。本轮只分支收尾和文档同步，无新增测试或设备执行。
+固定源身份、715主机通过/1旧跳过/11真卡未选，以及三生命周期和连续模型的精确边界见 [组件阶段公开验收摘要](https://github.com/FlagRT/FlagMemory/blob/xliu969/pool-impl/docs/validation/2026-11-05-pool-stage.md)。最终源为 `eef16077fb9d5982cfd136e54570ac17888b7757`，新桥接设备成绩源为 `a51ec5c00505eb6a816fcdeb57b8ccdb8c3357c5`。
 
 不覆盖权重/KV/激活池化、多芯片/多rank、训练/generate、性能收益或业务质量；接口语言面仍待正式冻结。固定模型输入链通过不等于显存完整交付或月度验收完成。
 
