@@ -49,3 +49,14 @@ A separate health-probe process must receive a separately reserved sub-budget; t
 有界执行器的 `bridge-lifecycle` 阶段沿用已核映射及健康前置，固定一颗映射目标、2 CPU/4 GiB、64 MiB 累计底座申请、300 秒总时限和只读源挂载。该阶段只选择上述文件的三个生命周期，显式启用值为 `approved-bridge-lifecycle`；来源、目标和查询合同先通过门禁，再延迟导入框架。只做公开事件查询与有限等待，不做全设备同步。调用方初始化并稳定持有框架上下文；框架 current_device 不证明独立 ACL 上下文，context_ok 为未校验。
 
 设备实测结果要求精确三个新入口且零失败、零错误、零跳过。待完成事件未观察到会跳过并记为 uncovered；该结果不产生可复用成功证据。不同原生 Python 流对象不证明不同物理流。释放只交还自有引用，累计额度不返还；清理失败或未完成均不能记为通过。显式收集可用 `pytest tests/pool/test_pool_device_context_ascend_realcard.py --collect-only -q -o addopts= -m realcard`，收集不导入厂商框架。
+
+
+### 统一桥接连续输入
+
+`tests/pool/test_onerec_device_context_ascend.py` 的单个真卡入口使用独立 enable 值
+`approved-bridge-sequence` 与 `onerec-bridge-sequence` 资源契约。门控验证固定公共设备包、
+已独立接受的三生命周期原始证据，以及分别登记的生命周期源与模型源祖先关系；旧单次输入门不生效。
+调用方初始化框架上下文并稳定持有。模型与 tokenizer 各加载一次；19 token 实例种子按 repeat/narrow
+构造 `(19,64,128,19)*4`，batch=1、全一 mask、BF16/eager、use_cache=False。
+逐组普通/池输入成对前向、embedding 消费校验、有限完成查询、归还后复用；只覆盖输入缓冲生命周期，
+不涵盖权重、KV、激活接管、业务质量或性能收益。使用独立审查的单用途宿主看门狗实施总期限、资源观察及精确自有容器清理。

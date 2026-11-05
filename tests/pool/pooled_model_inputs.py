@@ -1,4 +1,4 @@
-﻿"""Test-only pooled integer inputs; no framework imports."""
+"""Test-only pooled integer inputs; no framework imports."""
 from dataclasses import dataclass
 import time
 import math
@@ -34,7 +34,7 @@ def _identity(tensor):
     return storage.data_ptr(), offset, size, tensor.data_ptr()
 
 
-def lease_input_ids(pool, runtime, cpu_ids, *, stream, stream_id, device):
+def lease_input_ids(pool, runtime, cpu_ids, *, stream, stream_id, device, stream_context=None):
     shape = tuple(cpu_ids.shape)
     if (len(shape) != 2 or shape[0] != 1 or not 1 <= shape[1] <= 128
             or cpu_ids.dtype != runtime.int64 or not _device(cpu_ids, 'cpu')
@@ -52,8 +52,12 @@ def lease_input_ids(pool, runtime, cpu_ids, *, stream, stream_id, device):
             raise ValueError('invalid pool backing')
         lease.tensor = base.narrow(0, 0, nbytes).view(runtime.int64).view(1, shape[1])
         assert_consumed_input(lease, lease.tensor, device=device)
-        with runtime.npu.device(device), runtime.npu.stream(stream):
-            lease.tensor.copy_(cpu_ids, non_blocking=False)
+        if stream_context is None:
+            with runtime.npu.device(device), runtime.npu.stream(stream):
+                lease.tensor.copy_(cpu_ids, non_blocking=False)
+        else:
+            with stream_context():
+                lease.tensor.copy_(cpu_ids, non_blocking=False)
         return lease
     except Exception as exc:
         raise InputLeaseError('input construction failed; lease requires safe cleanup', lease) from exc
@@ -78,10 +82,12 @@ def assert_consumed_input(lease, actual, *, device):
             'storage_ptr': sid, 'offset_bytes': offset, 'data_ptr': ptr, 'nbytes': size}
 
 
-def confirm_completion(backend, *, stream, timeout_s):
+def confirm_completion(backend, *, stream, timeout_s, device_index=None):
     if not isinstance(timeout_s, (int, float)) or isinstance(timeout_s, bool) or not math.isfinite(timeout_s) or timeout_s < 0:
         raise ValueError('invalid timeout')
-    event = backend.create_event(device_index=stream.device.index)
+    if device_index is not None and (isinstance(device_index, bool) or not isinstance(device_index, int) or device_index < 0):
+        raise ValueError('invalid explicit device index')
+    event = backend.create_event(device_index=stream.device.index if device_index is None else device_index)
     backend.record_event(event, stream)
     deadline = time.monotonic() + timeout_s
     while not backend.query_event(event):
@@ -91,13 +97,13 @@ def confirm_completion(backend, *, stream, timeout_s):
     return deadline
 
 
-def release_input_ids(lease, pool, backend, *, stream, timeout_s, evidence=None):
+def release_input_ids(lease, pool, backend, *, stream, timeout_s, evidence=None, device_index=None):
     if lease.closed or lease.return_attempted:
         raise ValueError('lease already returned or return outcome uncertain')
     evidence = evidence if evidence is not None else {}
     evidence.update(completion={'status': 'not_attempted'}, free={'status': 'not_attempted'}, drain={'status': 'not_attempted'})
     try:
-        deadline = confirm_completion(backend, stream=stream, timeout_s=timeout_s)
+        deadline = confirm_completion(backend, stream=stream, timeout_s=timeout_s, device_index=device_index)
     except Exception as exc:
         evidence['completion'] = {'status': 'failed', 'error': repr(exc)}
         raise

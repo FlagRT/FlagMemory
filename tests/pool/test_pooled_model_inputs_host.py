@@ -330,3 +330,31 @@ def test_entry_second_copy_and_destroy_error_keep_original_error():
     assert 'second copy failed' in repr(failure.value.__cause__)
     assert record['destroy']['completed'] is False and 'destroy' in record['cleanup_errors']
     assert pool.free_calls == 2
+
+
+@pytest.mark.parametrize('device', [True, -1, 1.5])
+def test_explicit_device_rejects_before_event(device):
+    from pooled_model_inputs import confirm_completion
+    class B:
+        def create_event(self, **kw): pytest.fail('event side effect')
+    with pytest.raises(ValueError): confirm_completion(B(), stream=object(), timeout_s=0, device_index=device)
+
+
+def test_unified_stream_explicit_device_and_context(input_case):
+    from pooled_model_inputs import lease_input_ids, release_input_ids
+    pool, runtime, ids, _ = input_case
+    class Unified:
+        def __getattr__(self, name): raise AssertionError('nonpublic stream access: '+name)
+    stream = Unified(); entered = []
+    from contextlib import contextmanager
+    @contextmanager
+    def context():
+        entered.append(True); yield
+    runtime.npu = None
+    lease = lease_input_ids(pool, runtime, ids, stream=stream, stream_id=3, device=2, stream_context=context)
+    class B(FakeBackend):
+        def create_event(self, device_index):
+            assert device_index == 2
+            return object()
+    release_input_ids(lease, pool, B(), stream=stream, timeout_s=1, device_index=2)
+    assert entered == [True] and lease.closed
