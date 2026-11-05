@@ -280,6 +280,8 @@ class ReclaimResult:
     met_target: bool
     #: 按用途标签聚合的释放量
     released_by_purpose: dict[Purpose, int]
+    #: 分层换出回调回报的字节数（未允许分层换出、未登记回调或回报 None 时为 0）
+    tier_offloaded_bytes: int
     note: str
 
 
@@ -344,6 +346,8 @@ class CapabilityView:
     backend_name: str
     form: PoolForm
     native_stream_ordered: bool
+    #: 建池换出回调是否已登记（接线可观测，I-10；未登记时允许分层换出仍报 NotWired）
+    tier_offload_wired: bool
     core_path_ready: bool
     missing_core: frozenset[Any]
     branches_enabled: frozenset[Any]

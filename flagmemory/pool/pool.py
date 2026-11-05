@@ -19,7 +19,7 @@ from __future__ import annotations
 import time
 from itertools import count
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from ..caps.backend import CapabilityNotDeclared
 from ..caps.capabilities import Capability
@@ -155,6 +155,7 @@ class BlockPool:
         reuse: ReusePolicy,
         degradations: tuple[DegradationNotice, ...],
         barrier_timeout_s: float,
+        offload_callback: Callable[["BlockPool"], int] | None = None,
     ) -> None:
         self._backend = backend
         self._device_index = device_index
@@ -162,6 +163,8 @@ class BlockPool:
         self._workload = workload
         self._tiers = tier_table
         self._base_allocator = base_allocator
+        #: 建池时登记的分层换出回调（设计文档·分层存储 1.2 第 2 条）；None = 未接线
+        self._offload_callback = offload_callback
         self._reuse = reuse
         self._degradations = degradations
         self._ledger = Ledger()
@@ -611,10 +614,16 @@ class BlockPool:
         pressure: PressureLevel | None = None,
         allow_tier_offload: bool = False,
     ) -> ReclaimResult:
-        """压力回收：进程内回收，如实返回实际释放量。
+        """压力回收：进程内回收，如实返回实际释放量；允许分层换出时先经建池回调换出。
 
         只动 `可复用` 的块，且按用途标签的次序走（临时工作区 → 激活 → KV 缓存）；
         **权重与通信缓冲、以及「未声明」的块一概不动**（`I-12`）。
+
+        分层换出（`allow_tier_offload=True`）：要求建池时登记了换出回调，否则维持 `NotWired`
+        （不给空壳）。登记后先调回调一次并传入池自身 —— 分层侧自行用池的公开操作换出并回报
+        字节数，计入 `tier_offloaded_bytes`（返回 `None` 按 0 计）；回调异常原样上抛。目标是否
+        达成按「进程内释放 + 分层换出」合计判读，两个分量在结果里分别可查。池不 import
+        分层存储（不变量 `T-5`）。
 
         达不到目标量就返回实际量并标「未达目标」，不谎报（`I-10`）。
         **不做任何设备级恢复**（`I-5`）：四家里只有昇腾有设备级真重建，另三家分别是无原语、
@@ -623,20 +632,29 @@ class BlockPool:
         self._require_alive()
         if (target_bytes is None) == (pressure is None):
             raise InvalidArgument("target_bytes 与 pressure 必须给且只给一个。")
-        if allow_tier_offload:
+        if allow_tier_offload and self._offload_callback is None:
             raise NotWired(
-                "分层换出的触发口在本实现里没有接线：池与 flagmemory.tiering 的联动属分层存储"
-                "那条出口，不在分级块池这条里。按「不给空壳」的纪律这里报错，而不是返回一个"
-                "假的成功 —— 未实现项已列进交付说明。"
+                "分层换出的触发口没有接线：建池时未登记换出回调（offload_callback），"
+                "`allow_tier_offload=True` 无从触发。按「不给空壳」的纪律这里报错，而不是"
+                "返回一个假的成功 —— 未实现项已列进交付说明。"
             )
         if target_bytes is not None:
             if not isinstance(target_bytes, int) or isinstance(target_bytes, bool) or target_bytes <= 0:
                 raise InvalidArgument(f"target_bytes 必须是正 int，收到 {target_bytes!r}")
-            requested = target_bytes
         else:
             assert pressure is not None
             if not isinstance(pressure, PressureLevel):
                 raise InvalidArgument(f"pressure 必须取自 PressureLevel，收到 {pressure!r}")
+        # 分层换出（设计文档·分层存储 1.2 第 2 条）：压力事件只通知一次，分层侧自行用池的
+        # 公开操作换出并回报字节数。回调异常原样上抛不吞（I-10），返回 None 按 0 计。
+        tier_offloaded = 0
+        if allow_tier_offload:
+            offloaded = self._offload_callback(self)
+            tier_offloaded = 0 if offloaded is None else offloaded
+        if target_bytes is not None:
+            requested = target_bytes
+        else:
+            assert pressure is not None
             reusable = self._ledger.bytes_in_state(BlockState.REUSABLE)
             requested = int(reusable * pressure.fraction)
 
@@ -659,18 +677,25 @@ class BlockPool:
                     released_blocks += 1
                     by_purpose[purpose] = by_purpose.get(purpose, 0) + freed
 
-        met = released_bytes >= requested
+        met = released_bytes + tier_offloaded >= requested
+        if met:
+            note = (
+                f"达到目标量（进程内释放 {released_bytes} 字节、分层换出 {tier_offloaded} 字节）。"
+                if tier_offloaded
+                else "达到目标量。"
+            )
+        else:
+            note = "未达目标：可复用块里能动的已全部交回（权重/通信缓冲/未声明按 I-12 不动）。"
+            if tier_offloaded:
+                note += f"分层换出 {tier_offloaded} 字节。"
         return ReclaimResult(
             requested_bytes=requested,
             released_bytes=released_bytes,
             released_blocks=released_blocks,
             met_target=met,
             released_by_purpose=by_purpose,
-            note=(
-                "达到目标量。"
-                if met
-                else "未达目标：可复用块里能动的已全部交回（权重/通信缓冲/未声明按 I-12 不动）。"
-            ),
+            tier_offloaded_bytes=tier_offloaded,
+            note=note,
         )
 
     # ------------------------------------------------------------------
@@ -782,6 +807,7 @@ class BlockPool:
             backend_name=rep.backend_name,
             form=self._form,
             native_stream_ordered=self.native_stream_ordered,
+            tier_offload_wired=self._offload_callback is not None,
             core_path_ready=rep.core_path_ready,
             missing_core=rep.missing_core,
             branches_enabled=frozenset(
@@ -896,6 +922,7 @@ def create_pool(
     tier_count: int = DEFAULT_TIER_COUNT,
     reuse: ReusePolicy | None = None,
     barrier_timeout_s: float = DEFAULT_TIMEOUT_S,
+    offload_callback: Callable[[BlockPool], int] | None = None,
 ) -> BlockPool:
     """在调用方**既有**设备上下文内创建一个池，定下实现形态与档位表。
 
@@ -910,9 +937,18 @@ def create_pool(
     | `HANDLE` | 句柄形态（优化路径）。后端未声明 `MEMORY_HANDLE` 则报 `FormUnavailable`，**不静默退化**（`I-10`） |
     | `AUTO` | 给了 `base_allocator` 就用张量级；没给而后端声明了句柄能力就用句柄形态（这条选择会进 `query_capability` 的降级清单，不静默）；两者都没有就报错 |
 
+    换出回调（`offload_callback`，可选）：分层存储侧登记的唯一反向口。池只在
+    `reclaim(..., allow_tier_offload=True)` 时调用它一次并传入池自身；分层侧自行用池的
+    公开操作完成换出并回报换出字节数（返回 `None` 按 0 计）。池不 import 分层存储，
+    更不 import 推理框架（不变量 `T-5`，《分层存储概念与设计基础》1.2 第 2 条）。
+
     `I-8`：核心路径只许用四家齐备的 L0 能力。L0 不齐 ⇒ 池在这款芯片上**不该起**，
     而不是降级 —— 所以这里直接报错。
     """
+    if offload_callback is not None and not callable(offload_callback):
+        raise InvalidArgument(
+            f"offload_callback 必须可调用：接收池实例、返回换出字节数（收到 {offload_callback!r}）。"
+        )
     rep = caps_report(backend)
     if not rep.core_path_ready:
         missing = "、".join(sorted(cap.value for cap in rep.missing_core))
@@ -991,4 +1027,5 @@ def create_pool(
         reuse=reuse or ReusePolicy(),
         degradations=tuple(degradations),
         barrier_timeout_s=barrier_timeout_s,
+        offload_callback=offload_callback,
     )
