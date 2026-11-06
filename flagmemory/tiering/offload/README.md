@@ -50,6 +50,20 @@ logger，本包的 logger 输出会被吞，所以诊断走 stderr。
 - 触发 recall-load 的配方：GPU 池内前缀块被**覆写**（而非 free）后重放原 prompt；
   cached-free 块 hash 保留，重放只走 GPU 命中，不产生 load。
 
+## XPU 栈 API 面事实（2026-11-05 取证）
+
+- 该栈上 `torch.xpu.*` 恒不可用（Torch not compiled with XPU enabled）；实际后端 =
+  `torch_xmlir` 符号重写，import 时把 `torch.cuda.*` 映射到 XPU（打印
+  `SYMBOL_REWRITE torch success`）。监控/记账 API 必须走 `torch.cuda.*`
+  （如 `torch.cuda.memory_stats`），不得走 `torch.xpu.*`（代码侧登记：
+  `xpu/xpu_copy_backend.py` 模块头 Device notes）。
+- 实例环境锚：镜像 `flagrt/kunlun-operator-runtime:2.0.0`（id `cac5ddae5f62`）、
+  torch 2.9.0+cu129、驱动栈 1.0:2.43:1.86.5.3、单卡单次实测；换栈须重探。
+  取证记录见指挥台仓 `inbox/取证-昆仑芯P800分配粒度基数-20261105.md`。
+- 同场取证的分配粒度实例值（块级最小 512 B / 段级 2 MiB 对齐 / 大小块分界 ≈10 MiB）
+  登记在《显存池概念与设计基础》第八节第 4 条；档位输入实例默认 =
+  `flagmemory.pool.KUNLUN_P800_INSTANCE_TIER_SPEC`。
+
 ## 从 w2_* 旧名迁移（2026-10-24）
 
 历史报告与服务器旧探针引用旧包名，复现时按下表换算：
@@ -71,3 +85,19 @@ logger，本包的 logger 输出会被吞，所以诊断走 stderr。
 
 - 不做带宽优化（staging 聚合、批量 DMA）；不碰 `v1/kv_offload/` 通用框架；
   不改 vllm / vllm-ascend / vllm_fl / vllm-plugin-fl 任何文件，容器重建即回基线。
+
+## 分层存储接线现状（TierBackend 协议面）
+
+| 栈 | 状态 | 接线层 |
+|---|---|---|
+| Ascend 910C（npu） | 已接 TierBackend 协议面（协议形状 / 能力声明映射 / 降级登记 / 注册路径主机可验；真卡闭环用例带 realcard 标记，跑卡窗口另排） | `flagmemory/tiering/backends/npu_backend.py` |
+| 昆仑 P800（xpu） | 待改造 | — |
+| PPU ZW810E（ppu） | 待改造 | — |
+
+接线方向（设计 T-5）：外部把适配层包成 `TierBackend` 注册给 manager
+（`register_npu_tier_backend`）；manager 本体不 import offload 实现与接线层，
+connector 经推理引擎 KV 外挂点的加载方式不变。能力按本 README 与
+`npu/RUNBOOK.md` 登记的实测事实填：批量搬运原语无（声明即降级态）、锁页声明支持
+（注册时实测试锁，探测不到按降级登记上报）、搬运粒度以 bind 时 connector 推导
+值为准（未 bind 用 OneRec-8B @910C 实例值 ≈2.2 MiB/块）。条目级访问统计
+connector 不提供，恒按「取不到 → 退用其余判据并标降级」处置。

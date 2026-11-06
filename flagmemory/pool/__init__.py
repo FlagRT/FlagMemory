@@ -12,7 +12,7 @@
 |---|---|
 | `types` | 六态状态机、用途标签六类与策略、负载类型、实现形态、各结果视图、异常 |
 | `base` | 池向下要的五个**可选**协议口：底座 / 分配粒度 / 原生流有序 / 跨流保护 / 上下文只读观测 |
-| `tiers` | 档位表：按运行时查到的分配粒度切档，池本体不内嵌粒度常数 |
+| `tiers` | 档位表：按运行时查到的分配粒度切档，池本体不编粒度常数（昆仑芯 P800 的实测实例默认以带来源的命名常数登记，仅供调用方显式采用） |
 | `streams` | 流登记表：强持有到池销毁（`I-3`），刻意不 import weakref |
 | `barrier` | 回收屏障：只轮询事件 + 单调钟截止，不阻塞等待（`I-2` / `I-11`） |
 | `ledger` | 块账本：稳定底座与活租约映射、状态索引、分级空闲表、隔离区（`I-1`） |
@@ -34,7 +34,13 @@ from .base import (
 from .ledger import Block, Ledger
 from .pool import BlockPool, ReusePolicy, create_pool, list_custodied_pools, recover_custodied_pool
 from .streams import DEFAULT_STREAM_ID, StreamRegistry
-from .tiers import DEFAULT_TIER_COUNT, TierSpec, TierTable, resolve_tier_table
+from .tiers import (
+    DEFAULT_TIER_COUNT,
+    KUNLUN_P800_INSTANCE_TIER_SPEC,
+    TierSpec,
+    TierTable,
+    resolve_tier_table,
+)
 from .types import (
     AuditView,
     BlockQuarantined,
@@ -88,6 +94,7 @@ __all__ = [
     "TierTable",
     "resolve_tier_table",
     "DEFAULT_TIER_COUNT",
+    "KUNLUN_P800_INSTANCE_TIER_SPEC",
     # 流与屏障
     "StreamRegistry",
     "DEFAULT_STREAM_ID",

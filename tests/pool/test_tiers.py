@@ -11,6 +11,7 @@ import pytest
 from flagmemory.caps.capabilities import L0_CAPABILITIES, L1_CAPABILITIES
 from flagmemory.pool import (
     InvalidArgument,
+    KUNLUN_P800_INSTANCE_TIER_SPEC,
     PoolForm,
     TierSpec,
     TierTable,
@@ -73,6 +74,20 @@ class TestNormal:
         table = resolve_tier_table(backend, tier_spec=spec)
         assert table.source == "caller_config"
         assert table.tiers[0] == 1 << 20
+
+    def test_昆仑芯实例默认可作档位输入(self):
+        """= 昆仑芯 P800 实测取证后的实例默认（512 B 块级 / 2 MiB 段级）。
+
+        走的仍是 `caller_config` 那条路：池不自动取用该常数，调用方显式传入才生效，
+        且随时可被自己的 `TierSpec` 覆盖（不写死为唯一常数）。
+        """
+        backend = CompletingBackend(name="kunlunxin-like", declared=frozenset(L0_CAPABILITIES))
+        table = resolve_tier_table(backend, tier_spec=KUNLUN_P800_INSTANCE_TIER_SPEC)
+        assert table.source == "caller_config"
+        assert table.spec.base_bytes == 2 * 1024 * 1024   # 段级 2 MiB 对齐作基数
+        assert table.spec.step_bytes == 512               # 块级最小粒度作步长
+        assert table.tiers[0] == 2 * 1024 * 1024
+        assert all(t % 512 == 0 for t in table.tiers)
 
 
 class TestBoundary:

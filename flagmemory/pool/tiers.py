@@ -20,7 +20,7 @@
 | 来源 | 适用 | 标记 |
 |---|---|---|
 | 后端的 `GranularitySource` 查询 | 昇腾 910C / 寒武纪 MLU590 / 平头哥 PPU | `backend_query` |
-| 调用方显式给的配置项 | **昆仑芯 P800**（两边都查不到粒度，无厂商声明可依据） | `caller_config` |
+| 调用方显式给的配置项 | **昆仑芯 P800**（原生无粒度声明可依据；实测实例默认已登记为下方 `KUNLUN_P800_INSTANCE_TIER_SPEC`，供调用方直接采用） | `caller_config` |
 """
 
 from __future__ import annotations
@@ -31,7 +31,12 @@ from typing import Any
 from .base import GranularitySource
 from .types import InvalidArgument, TierResolutionError
 
-__all__ = ["TierSpec", "TierTable", "resolve_tier_table"]
+__all__ = [
+    "KUNLUN_P800_INSTANCE_TIER_SPEC",
+    "TierSpec",
+    "TierTable",
+    "resolve_tier_table",
+]
 
 #: 默认档位数。属「实现可调参数」，不是粒度常数 —— 它不决定任何字节数，
 #: 只决定从基数往上翻几档。
@@ -60,6 +65,23 @@ class TierSpec:
                 raise InvalidArgument(f"TierSpec.{name} 必须是 int，收到 {type(value).__name__}")
             if value <= 0:
                 raise InvalidArgument(f"TierSpec.{name} 必须为正：{value}")
+
+
+#: 昆仑芯 P800 档位输入的**实例默认**（实测口径；调用方拿它当 `tier_spec` 传入，
+#: 也可给自己的 `TierSpec` 覆盖 —— `resolve_tier_table` 不自动取用它，推导逻辑不变）。
+#:
+#: 它不是池编出来的常数，是 2026-11-05 在昆仑芯 P800 上的分配粒度实测取证
+#: （取证记录见指挥台仓 `inbox/取证-昆仑芯P800分配粒度基数-20261105.md`）：
+#:
+#: - 块级最小粒度 512 B（kMinBlockSize 语义，1 B 请求实到 512 B）→ 作步长（最小粒度档）；
+#: - 段级（xpuMalloc 等价的裸分配）2 MiB 对齐 → 作档位基数（推荐粒度档）；
+#: - 大小块分界 ≈10 MiB（≤10 MiB 由约 20 MiB 缓冲段服务，>10 MiB 独立段按 2 MiB 取整）
+#:   —— 分界不进 `TierSpec` 的两档结构，只随取证登记在此备查。
+#:
+#: 实例环境锚（换栈换卡须重新取证）：镜像 flagrt/kunlun-operator-runtime:2.0.0
+#: （id cac5ddae5f62）、torch 2.9.0+cu129、驱动栈 1.0:2.43:1.86.5.3、单卡单次实测。
+#: 厂商侧无分配器查询接口，原生无粒度声明不变 —— 本常数是实测补充值，不是厂商声明。
+KUNLUN_P800_INSTANCE_TIER_SPEC = TierSpec(base_bytes=2 * 1024 * 1024, step_bytes=512)
 
 
 @dataclass(frozen=True)

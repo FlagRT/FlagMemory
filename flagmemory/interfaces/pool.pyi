@@ -40,6 +40,9 @@ from flagmemory.pool.types import (
 )
 
 DEFAULT_TIER_COUNT: int
+#: 昆仑芯 P800 档位输入的实测实例默认（512 B 块级 / 2 MiB 段级，来源与取证指针见
+#: flagmemory/pool/tiers.py）。调用方显式传入才生效，可被自己的 TierSpec 覆盖。
+KUNLUN_P800_INSTANCE_TIER_SPEC: TierSpec
 DEFAULT_TIMEOUT_S: float
 
 class ReusePolicy:
