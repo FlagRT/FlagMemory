@@ -63,6 +63,11 @@ logger，本包的 logger 输出会被吞，所以诊断走 stderr。
 - 同场取证的分配粒度实例值（块级最小 512 B / 段级 2 MiB 对齐 / 大小块分界 ≈10 MiB）
   登记在《显存池概念与设计基础》第八节第 4 条；档位输入实例默认 =
   `flagmemory.pool.KUNLUN_P800_INSTANCE_TIER_SPEC`。
+- （2026-11-06 补记）operator-runtime 镜像（`flagrt/kunlun-operator-runtime:2.0.0`，
+  id `cac5ddae5f62`）内置 vllm 0.13.0 **无**
+  `vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector`
+  模块 —— xpu connector 的框架外挂面在该镜像不可用（其运行环境须另定/待补）；
+  接线层（`xpu_backend.py`）不受影响。
 
 ## 从 w2_* 旧名迁移（2026-10-24）
 
