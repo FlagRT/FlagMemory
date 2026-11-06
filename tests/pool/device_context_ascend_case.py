@@ -88,19 +88,29 @@ def verify_runtime_origins(root):
                 # Accept only this exact namespace, with one frozen search root.
                 spec = getattr(module, '__spec__', None)
                 loader = getattr(spec, 'loader', None)
-                namespace_type = getattr(importlib.machinery, 'NamespaceLoader', ())
+                # NamespaceLoader 在 3.11+ 暴露于 importlib.machinery；部分发行版
+                # （如 Ubuntu 3.10 补丁版）以 _NamespaceLoader 形态向后移植在
+                # _bootstrap_external；原生 3.10 命名空间包 loader 为 None。三者取其真。
+                namespace_type = getattr(importlib.machinery, 'NamespaceLoader', None)                     or getattr(getattr(importlib, '_bootstrap_external', None), '_NamespaceLoader', None)                     or ()
                 expected = package/'conformance'
                 try:
                     paths = tuple(Path(p).resolve() for p in module.__path__)
                     spec_paths = tuple(Path(p).resolve() for p in spec.submodule_search_locations)
                 except (AttributeError, TypeError, ValueError, OSError):
                     raise ValueError('unverifiable runtime namespace: '+name) from None
-                if (file is not None or spec.name != name or spec.origin is not None
-                    or not isinstance(loader, namespace_type)
-                    or getattr(module, '__loader__', None) is not loader
-                    or paths != (expected,) or spec_paths != (expected,)
-                    or not expected.is_dir()):
-                    raise ValueError('foreign runtime namespace: '+name)
+                loader_ok = (loader is None and getattr(module, '__loader__', None) is None) or (
+                    bool(namespace_type) and isinstance(loader, namespace_type)
+                    and getattr(module, '__loader__', None) is loader)
+                failures=[]
+                if file is not None: failures.append('file')
+                if spec.name != name: failures.append('spec.name')
+                if spec.origin is not None: failures.append('spec.origin')
+                if not loader_ok: failures.append('loader')
+                if paths != (expected,): failures.append('paths='+repr(paths))
+                if spec_paths != (expected,): failures.append('spec_paths='+repr(spec_paths))
+                if not expected.is_dir(): failures.append('expected-dir')
+                if failures:
+                    raise ValueError('foreign runtime namespace: '+name+'; failing: '+', '.join(failures))
                 origins[name] = {'kind': 'namespace', 'path': str(expected)}
                 continue
             if not file: raise ValueError('runtime module has no verifiable origin: '+name)
