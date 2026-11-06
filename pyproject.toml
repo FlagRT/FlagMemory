@@ -23,7 +23,7 @@ dev = ["pytest>=8", "mypy>=1.8"]
 include = ["flagmemory*", "offload*"]
 
 [tool.setuptools.package-data]
-"flagmemory.interfaces" = ["pool.pyi"]
+"flagmemory.interfaces" = ["pool.pyi", "tier.pyi"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
