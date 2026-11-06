@@ -85,3 +85,19 @@ logger，本包的 logger 输出会被吞，所以诊断走 stderr。
 
 - 不做带宽优化（staging 聚合、批量 DMA）；不碰 `v1/kv_offload/` 通用框架；
   不改 vllm / vllm-ascend / vllm_fl / vllm-plugin-fl 任何文件，容器重建即回基线。
+
+## 分层存储接线现状（TierBackend 协议面）
+
+| 栈 | 状态 | 接线层 |
+|---|---|---|
+| Ascend 910C（npu） | 已接 TierBackend 协议面（协议形状 / 能力声明映射 / 降级登记 / 注册路径主机可验；真卡闭环用例带 realcard 标记，跑卡窗口另排） | `flagmemory/tiering/backends/npu_backend.py` |
+| 昆仑 P800（xpu） | 待改造 | — |
+| PPU ZW810E（ppu） | 待改造 | — |
+
+接线方向（设计 T-5）：外部把适配层包成 `TierBackend` 注册给 manager
+（`register_npu_tier_backend`）；manager 本体不 import offload 实现与接线层，
+connector 经推理引擎 KV 外挂点的加载方式不变。能力按本 README 与
+`npu/RUNBOOK.md` 登记的实测事实填：批量搬运原语无（声明即降级态）、锁页声明支持
+（注册时实测试锁，探测不到按降级登记上报）、搬运粒度以 bind 时 connector 推导
+值为准（未 bind 用 OneRec-8B @910C 实例值 ≈2.2 MiB/块）。条目级访问统计
+connector 不提供，恒按「取不到 → 退用其余判据并标降级」处置。
