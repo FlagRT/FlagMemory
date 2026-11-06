@@ -63,6 +63,11 @@ logger，本包的 logger 输出会被吞，所以诊断走 stderr。
 - 同场取证的分配粒度实例值（块级最小 512 B / 段级 2 MiB 对齐 / 大小块分界 ≈10 MiB）
   登记在《显存池概念与设计基础》第八节第 4 条；档位输入实例默认 =
   `flagmemory.pool.KUNLUN_P800_INSTANCE_TIER_SPEC`。
+- （2026-11-06 补记）operator-runtime 镜像（`flagrt/kunlun-operator-runtime:2.0.0`，
+  id `cac5ddae5f62`）内置 vllm 0.13.0 **无**
+  `vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector`
+  模块 —— xpu connector 的框架外挂面在该镜像不可用（其运行环境须另定/待补）；
+  接线层（`xpu_backend.py`）不受影响。
 
 ## 从 w2_* 旧名迁移（2026-10-24）
 
@@ -92,15 +97,20 @@ logger，本包的 logger 输出会被吞，所以诊断走 stderr。
 |---|---|---|
 | Ascend 910C（npu） | 已接 TierBackend 协议面（协议形状 / 能力声明映射 / 降级登记 / 注册路径主机可验；真卡闭环用例带 realcard 标记，跑卡窗口另排） | `flagmemory/tiering/backends/npu_backend.py` |
 | 昆仑 P800（xpu） | 已接 TierBackend 协议面（协议形状 / 能力声明映射 / 降级登记 / 注册路径主机可验；真卡闭环用例带 realcard 标记，跑卡窗口另排） | `flagmemory/tiering/backends/xpu_backend.py` |
-| PPU ZW810E（ppu） | 待改造 | — |
+| PPU ZW810E（ppu） | 已接 TierBackend 协议面（协议形状 / 能力声明映射 / 降级登记 / 注册路径主机可验；真卡闭环用例 `tests/tiering/test_ppu_backend_realcard.py` 于 2026-11-06 在 PTG_0 PPU 0 号卡通过） | `flagmemory/tiering/backends/ppu_backend.py` |
 
-接线方向（设计 T-5）：外部把适配层包成 `TierBackend` 注册给 manager
-（`register_npu_tier_backend` / `register_xpu_tier_backend`）；manager 本体不 import offload 实现与接线层，
+三栈全接（npu / xpu / ppu）。接线方向（设计 T-5）：外部把适配层包成 `TierBackend` 注册给 manager
+（`register_npu_tier_backend` / `register_xpu_tier_backend` / `register_ppu_tier_backend`）；manager 本体不 import offload 实现与接线层，
 connector 经推理引擎 KV 外挂点的加载方式不变。能力按本 README 与
 `npu/RUNBOOK.md` 登记的实测事实填：批量搬运原语无（声明即降级态）、锁页声明支持
 （注册时实测试锁，探测不到按降级登记上报）、搬运粒度以 bind 时 connector 推导
 值为准（npu 未 bind 用 OneRec-8B @910C 实例值 ≈2.2 MiB/块；xpu 未 bind 用
-P800 实测分配粒度实例值 2 MiB = `flagmemory.pool.KUNLUN_P800_INSTANCE_TIER_SPEC.base_bytes`）。条目级访问统计
+P800 实测分配粒度实例值 2 MiB = `flagmemory.pool.KUNLUN_P800_INSTANCE_TIER_SPEC.base_bytes`；
+ppu 未 bind 用 PPU 栈实例值 512 KiB/块 = `PPU_ZW810E_INSTANCE_BLOCK_BYTES`）。条目级访问统计
 connector 不提供，恒按「取不到 → 退用其余判据并标降级」处置。
+
+xpu 接线层特有：能力探测面一律按 `torch.cuda.*` API 写（torch_xmlir 符号重写映射到 XPU），`torch.xpu.*` 恒不可用（见上文「XPU 栈 API 面事实」节）。
+
+ppu 接线层特有：锁页按 P-3 三级降级链探测登记（`cudaHostRegister` → `pin_memory()` → 不锁页，探到哪级按哪级登记，级别名存 `probed_pinned_level`）；完成确认按设计 §4.1 第 4 条事件适配器——该栈未 record 事件原生查询返回「已完成」（2026-11-06 PTG_0 真卡复现），凭据不在事件表内一律 False。
 
 xpu 接线层特有：能力探测面一律按 `torch.cuda.*` API 写（torch_xmlir 符号重写映射到 XPU），`torch.xpu.*` 恒不可用（见上文「XPU 栈 API 面事实」节）。
