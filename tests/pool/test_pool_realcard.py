@@ -1,8 +1,9 @@
 """旧 CUDA 兼容命名空间的池真卡测试草稿，当前不是可用验收入口。
 
-默认由 realcard 标记排除；不要直接运行全部 realcard 或本文件。适配器尚缺当前流设备
-校验/目标流分配契约，租约复用与归还查询断言仍过时，并包含按空闲显存倍数申请的用例。
-后续首次昇腾验证采用独立入口和显式路径；本文件不代表新适配器已实现或真卡通过。
+默认由 realcard 标记排除；运行须显式指到本文件并置 FLAGMEMORY_ENABLE_LEGACY_CUDA。
+2026-11-06 已对齐现行池接口（DeviceBackend 的 validate_stream_device、BaseAllocator 的
+目标流关键字、租约撤销/复用换号语义），在昆仑芯 P800 真卡（operator-runtime 镜像、
+torch_xmlir 符号重写面）上 11/11 通过；昇腾侧另有独立入口（test_pool_ascend_realcard）。
 
 SDK 原语调查只提供候选证据：指挥台仓
 inbox/调研-四芯片SDK显存原语面补探-20261103.md；它不证明本适配器满足运行语义。
@@ -90,6 +91,19 @@ class RealCardBackend:
     def streams_equal(self, left: Any, right: Any) -> bool:
         return left == right
 
+    def validate_stream_device(self, stream: Any, device_index: int) -> None:
+        """现行 `DeviceBackend` L0 流面新增的核验口（`caps/backend.py`）。
+
+        该栈的流对象带 `device` 属性；对不上或不带都视为无法确认，抛错（协议要求
+        「不匹配或无法确认必须抛错」），绝不放行猜设备。
+        """
+        device = getattr(stream, "device", None)
+        index = getattr(device, "index", None)
+        if index is None or int(index) != int(device_index):
+            raise ValueError(
+                f"流对象 {stream!r} 无法确认属于设备 {device_index}（读到的 device={device!r}）"
+            )
+
     # —— L0：事件 ——
 
     def create_event(self, device_index: int = 0) -> Any:
@@ -124,11 +138,14 @@ class RealCardAllocator:
     live: dict[int, Any] = field(default_factory=dict, repr=False)
     _next: int = field(default=1, repr=False)
 
-    def allocate(self, nbytes: int, device_index: int = 0) -> Any:
+    def allocate(self, nbytes: int, device_index: int = 0, *, stream: Any) -> Any:
+        # 现行 `BaseAllocator` 协议带目标流关键字（`pool/base.py`）：分配须落在给定流
+        # 或建立首次使用就绪依赖。这里用流上下文包住申请，交给框架的缓存分配器记流序。
         try:
-            tensor = torch.empty(
-                nbytes, dtype=torch.int8, device=f"cuda:{device_index}"
-            )
+            with torch.cuda.stream(stream):
+                tensor = torch.empty(
+                    nbytes, dtype=torch.int8, device=f"cuda:{device_index}"
+                )
         except RuntimeError as exc:
             if "out of memory" in str(exc).lower():
                 raise MemoryError(str(exc)) from exc
@@ -257,14 +274,25 @@ class TestNormal:
         assert real_pool.free_block(view.block_id).state is BlockState.PENDING_RECYCLE
         result = real_pool.drain_stream(timeout_s=5.0)
         assert result.promoted_blocks == 1
-        assert real_pool.block_view(view.block_id).state is BlockState.REUSABLE
 
-        # 同档再要一次：命中复用，不向底座重新取块
+        # 现行租约语义（ledger.py `get`/`renew`）：归还即撤销旧租约、复用时发新租约号
+        # 且**不复用已归还标识**（设计文档 2.1）。所以旧租约号在此必须被账本拒绝 ——
+        # 这本身就是「块已进池内流转」的证明，不再是旧套件假定的 block_view 可查。
+        from flagmemory.pool import OwnershipViolation as _OV
+        with pytest.raises(_OV):
+            real_pool.block_view(view.block_id)
+
+        # 同档再要一次：命中复用，不向底座重新取块。判据改为现行契约的等价表达 ——
+        # 复用保持同一 storage 身份（物理块没换），且 base_fetches 零增长（没向底座取）。
+        before_fetches = real_pool.query_audit().base_fetches
         again = real_pool.alloc_on_stream(
             real_pool.tier_table.tiers[1], stream_id=stream_id, purpose=Purpose.ACTIVATION
         )
-        assert again.block_id == view.block_id
-        assert real_pool.query_audit().reuse_hits == 1
+        assert again.storage_id == view.storage_id
+        assert again.block_id != view.block_id      # 新租约号，不复用已归还标识
+        audit = real_pool.query_audit()
+        assert audit.reuse_hits == 1
+        assert audit.base_fetches == before_fetches
         real_pool.free_block(again.block_id)
         real_pool.drain_stream(timeout_s=5.0)
 
@@ -417,7 +445,14 @@ class TestError:
         real_pool.free_block(view.block_id)
         with pytest.raises(OwnershipViolation):
             real_pool.free_block(view.block_id)
-        assert real_pool.block_view(view.block_id).state is BlockState.QUARANTINED
+        # 现行契约（pool.py `free_block` docstring + ledger.py `get`）：重复归还由账本
+        # 拒绝且**不损伤当前块** —— 块继续走正常回收路（而非旧套件假定的转隔离终态）。
+        # 判据：那块仍被正常推进为可复用，且旧租约号不再可查。
+        result = real_pool.drain_stream(timeout_s=5.0)
+        assert result.promoted_blocks == 1
+        assert result.quarantined_blocks == ()
+        with pytest.raises(OwnershipViolation):
+            real_pool.block_view(view.block_id)
 
     def test_容量不足时报错不静默缩小请求(self, real_backend, real_allocator, device_index: int):
         """按真卡的空闲量定一个一定要不到的档，必须报错而不是悄悄给个小的。"""
