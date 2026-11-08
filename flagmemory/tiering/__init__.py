@@ -9,9 +9,15 @@ R1..R14、双指标触发判读 E1..E4 / I1..I3、抖动抑制四件、级二账
 不变量 T-1..T-11 的登记处是 `docs/design/分层存储概念与设计基础.md` 第五节。
 管理器本体不 import 推理框架、不 import offload 的任何实现（T-5）——
 搬运后端只经 `manager.TierBackend` 协议接入。
+
+异步在途轨增量（2026-11）：evict_async / promote_async / poll_transfers /
+query_transfers——发起即返回，在途账本有明确「在途」状态，完成确认后才变更归属；
+级三留位接到位（apply_r13_disposition 处置口 + tier3_backend_registered 槽位）。
 """
 
 from .manager import (
+    AsyncEvictReceipt,
+    AsyncPromoteReceipt,
     CooldownRejected,
     CrossStreamUndeclared,
     EvictResult,
@@ -22,6 +28,7 @@ from .manager import (
     PromoteResult,
     Tier2Entry,
     Tier2Watermark,
+    Tier3DispositionReport,
     TierAuditView,
     TierBackend,
     TierBackendCapability,
@@ -37,11 +44,18 @@ from .manager import (
     TierRegistration,
     TierUnavailable,
     TierWatermarkView,
+    TransferDirection,
+    TransferOutcome,
+    TransferPollReport,
+    TransferState,
+    TransferTicket,
     create_tier_manager,
     destroy_tier_manager,
 )
 
 __all__ = [
+    "AsyncEvictReceipt",
+    "AsyncPromoteReceipt",
     "CooldownRejected",
     "CrossStreamUndeclared",
     "EvictResult",
@@ -52,6 +66,7 @@ __all__ = [
     "PromoteResult",
     "Tier2Entry",
     "Tier2Watermark",
+    "Tier3DispositionReport",
     "TierAuditView",
     "TierBackend",
     "TierBackendCapability",
@@ -67,6 +82,11 @@ __all__ = [
     "TierRegistration",
     "TierUnavailable",
     "TierWatermarkView",
+    "TransferDirection",
+    "TransferOutcome",
+    "TransferPollReport",
+    "TransferState",
+    "TransferTicket",
     "create_tier_manager",
     "destroy_tier_manager",
 ]

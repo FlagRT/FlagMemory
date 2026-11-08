@@ -6,7 +6,10 @@
 可注入的故障：
 - `fail_copy_out` / `fail_copy_in`：拷贝中途失败（可先把半个条目写进 storage 再抛，
   用来验「条目不落账本 ⇒ 级二查不到」的 T-7 时序）；
-- `never_confirm`：完成确认永远不通过（轮询耗尽 ⇒ 按搬运失败处置）；
+- `never_confirm`：完成确认永远不通过（同步轨 ⇒ 轮询耗尽按搬运失败处置；
+  异步轨 ⇒ 转确认超时可恢复态）；
+- `confirm_after_polls`：前 N 次问询返回 False、之后 True（异步轨的在途时长模拟）；
+- `fail_on_confirm`：confirm 阶段抛异常（异步轨的确认期失败信号）；
 - `stats`：判据 4/5 的条目级统计（不给 ⇒ None，退用其余判据并标降级）。
 """
 
@@ -40,6 +43,8 @@ class FakeTierBackend:
         fail_copy_out: bool = False,
         fail_copy_in: bool = False,
         never_confirm: bool = False,
+        confirm_after_polls: int = 0,
+        fail_on_confirm: bool = False,
     ) -> None:
         self.backend_id = backend_id
         self._granularity = granularity_bytes
@@ -56,6 +61,8 @@ class FakeTierBackend:
         self.fail_copy_out = fail_copy_out
         self.fail_copy_in = fail_copy_in
         self.never_confirm = never_confirm
+        self.confirm_after_polls = confirm_after_polls
+        self.fail_on_confirm = fail_on_confirm
         #: 级二主机侧存储（entry_id -> 内容字节）
         self.storage: dict[str, bytes] = {}
         #: 级一内容模拟（block_id -> 内容字节），由用例预先放好，copy_out 从这取
@@ -65,6 +72,8 @@ class FakeTierBackend:
         #: 逐块拷贝调用记录（(方向, entry_id, block_id, nbytes, stream_id)）
         self.copy_log: list[tuple[str, str, int, int, int]] = []
         self.dropped: list[str] = []
+        #: 每笔完成凭据被问询的次数（id(ticket) -> 次数），confirm_after_polls 用
+        self.confirm_counts: dict[int, int] = {}
 
     # —— 协议面 ——
 
@@ -100,7 +109,14 @@ class FakeTierBackend:
         return object()
 
     def confirm(self, ticket: Any) -> bool:
-        return not self.never_confirm
+        if self.fail_on_confirm:
+            # 确认期失败：事件适配器问询时报告搬运失败（异步轨的失败信号）
+            raise RuntimeError("注入：confirm 阶段搬运失败（事件适配器报错）")
+        if self.never_confirm:
+            return False
+        count = self.confirm_counts.get(id(ticket), 0) + 1
+        self.confirm_counts[id(ticket)] = count
+        return count > self.confirm_after_polls
 
     def block_activity(self, block_id: int) -> TierEntryStats | None:
         return self.stats.get(block_id)
