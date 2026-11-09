@@ -143,6 +143,46 @@ def test_逐块拷贝完成确认与轮询语义():
     assert adapter.confirm(999) is False
 
 
+def test_copy_in源行按条目定位_不得拿block_id当源行():
+    """防回归（钉 2026-11-08 910C 真卡冒烟暴露、同日在昆仑芯栈判读坐实的同款
+    拷错行缺陷，同日产品修复）：
+
+    manager 换入时新块号 ≠ 条目级二落点行 —— copy_in 的源行必须取条目记录
+    （copy_out 发起登记 / register_entry 预登记，后者会被同条目 copy_out 的
+    实际发起覆盖），目标行才是传入的 block_id；未知条目按 T-4 报错不静默，
+    绝不退化为「拿 block_id 当源行」。"""
+    copy_backend = FakeXpuCopyBackend()
+    adapter = XpuTierBackend(copy_backend=copy_backend)
+    bind_fake(adapter, copy_backend)
+
+    # 形态一：copy_out 发起即登记落点行 5；换入交块给新行 9 —— 源 5 目标 9
+    adapter.copy_out("e1", 5, 64 << 10, stream_id=0)
+    adapter.copy_in("e1", 9, 64 << 10, stream_id=0)
+    assert copy_backend.launches[-1] == ((5,), (9,), False, 2)
+
+    # 形态二：外部 register_entry 预登记旧行 7（宿主接管既有级二副本形态）
+    adapter.register_entry("e2", 7)
+    adapter.copy_in("e2", 12, 64 << 10, stream_id=0)
+    assert copy_backend.launches[-1] == ((7,), (12,), False, 3)
+
+    # 形态三：同条目 copy_out 以实际发起覆盖预登记（落点以最后发起为准）
+    adapter.register_entry("e3", 3)
+    adapter.copy_out("e3", 6, 64 << 10, stream_id=0)
+    adapter.copy_in("e3", 8, 64 << 10, stream_id=0)
+    assert copy_backend.launches[-1] == ((6,), (8,), False, 5)
+
+    # 形态四：未知条目按 T-4 报错不静默，绝不退化为 block_id 当源行
+    from flagmemory.tiering.manager import TierError
+
+    with pytest.raises(TierError, match="级二落点"):
+        adapter.copy_in("ghost", 4, 64 << 10, stream_id=0)
+
+    # 撤账后同条目再换入 = 回到未知形态，同样报错
+    adapter.drop_entry("e1")
+    with pytest.raises(TierError, match="级二落点"):
+        adapter.copy_in("e1", 10, 64 << 10, stream_id=0)
+
+
 def test_条目统计取不到给None_drop_entry只动账面():
     adapter = XpuTierBackend(copy_backend=FakeXpuCopyBackend())
     bind_fake(adapter, adapter._copy_backend)
