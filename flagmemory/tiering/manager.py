@@ -10,12 +10,21 @@
 的任何实现**——后端只经下面的 `TierBackend` 协议接入；芯片差异只许出现在协议声明里，
 本体代码不出现「如果是某家芯片」的分支。向下只依赖池的 15 条对外接口，不读池内部结构。
 
-第一增量的边界（真卡改造留给后续增量）：
-- 搬运后端用协议对象接入；本仓测试用主机内存字典模拟级二（`tests/tiering/fakes.py`），
+增量的边界（真卡改造留给后续增量）：
+- 搬运后端用协议对象接入；本仓测试用主机内存字典模拟级二（`tests/tiering/tier_fakes.py`），
   三套真实卸载适配层到本接口面的改造未做（设计第八节第 5 条）；
 - 级三整层未实现，只在决策表（R13）、水位与审计里占位（设计第八节第 2 条）；
-- 搬运是同步完成确认（拷贝 + confirm 立即判定），不做异步在途排队；
-  `destroy` 的在途清单机制已就位但单线程下恒空。
+  本增量把占位接到可操作面：`apply_r13_disposition` 兑现「级三未实现 ⇒ 按级二
+  淘汰策略丢弃并计入审计」的处置口，能力面给 `tier3_backend_registered` 留位槽
+  （恒 False——留位不是实现第三级后端）；
+- 搬运两轨：`evict` / `promote` 保持同步完成确认（发起即轮询判定）；
+  `evict_async` / `promote_async` / `poll_transfers` / `query_transfers` 是
+  异步在途轨——发起即返回，搬运中的块/条目在**在途账本**（`self._transfers`）里
+  有明确的「在途」状态与跟踪，完成确认（poll）后才变更归属（T-7 的异步形态）。
+  在途块不得被二次调度或重复归还（重复换出/换入一律显式拒绝并计审计）；
+  搬运失败分两个时点：**发起期失败**（copy_* 抛错 / 无完成凭据）与**确认期失败**
+  （confirm 抛错），两者的回收语义都按 3.5「换出不落账本不还块、换入归还预留块」；
+  确认超时是可恢复态不是失败（T-7 / 池的 I-11），条目留在在途表可继续轮询。
 """
 
 from __future__ import annotations
@@ -62,6 +71,16 @@ __all__ = [
     "TierAuditView",
     "Tier2Entry",
     "TierDestroyReport",
+    # 异步在途轨（本增量）
+    "TransferDirection",
+    "TransferState",
+    "TransferTicket",
+    "TransferOutcome",
+    "TransferPollReport",
+    "AsyncEvictReceipt",
+    "AsyncPromoteReceipt",
+    # 级三留位（本增量）
+    "Tier3DispositionReport",
     # 本体
     "TierManager",
     "create_tier_manager",
@@ -128,6 +147,24 @@ class TierLevel(Enum):
     TIER1 = "级一·设备显存"
     TIER2 = "级二·主机内存"
     TIER3 = "级三·更慢介质（未实现，结构留位）"
+
+
+class TransferDirection(Enum):
+    """在途搬运的方向（异步轨）。"""
+
+    EVICT = "换出（级一→级二）"
+    PROMOTE = "换入（级二→级一）"
+
+
+class TransferState(Enum):
+    """在途搬运的状态。生命周期：PENDING →（确认）CONFIRMED 出表落账/交块；
+    PENDING →（确认期报错）FAILED 出表回收；PENDING →（问询预算耗尽）TIMED_OUT
+    **留在表里**（可恢复态，不算失败，T-7 / 池的 I-11「超时不等于失败」）。"""
+
+    PENDING = "在途"
+    TIMED_OUT = "确认超时（可恢复，仍在途）"
+    CONFIRMED = "完成"
+    FAILED = "失败"
 
 
 @dataclass(frozen=True)
@@ -294,6 +331,11 @@ def _validate_policy(
         value = getattr(policy, name)
         if not 0.0 <= value <= 1.0:
             raise TierConfigError(f"水位 {name}={value} 必须在 0..1（占用率口径）。")
+    if not 0.0 <= policy.level2_high_watermark <= 1.0:
+        raise TierConfigError(
+            f"级二高水位 level2_high_watermark={policy.level2_high_watermark} "
+            f"必须在 0..1（占用率口径）。"
+        )
     # T-2 滞回带：L ≤ H − 一次搬运粒度 × N（按各自容量基数换算成占用率）。
     # 基数下限 = 粒度 × (N+2)：池还空着时（pool_total 小）不把带宽算成天文数字。
     dev_base = max(device_total, granularity_bytes * (policy.hysteresis_n + 2), 1)
@@ -455,6 +497,8 @@ class TierCapabilityView:
     transfer_granularity_bytes: int
     #: 空转退避现状：连续空转轮数（有候选立即复位）
     backoff_rounds: int
+    #: 级三后端是否已注册（留位槽，恒 False——设计第八节第 2 条：结构留位，不承诺实现）
+    tier3_backend_registered: bool = False
 
 
 @dataclass(frozen=True)
@@ -477,8 +521,10 @@ class TierAuditView:
     unmet_target_evicts: int
     copy_failures: int
     cross_stream_declarations: int
-    #: 级三缺失丢弃（R13；级三未实现，本增量只登记计数位，见模块 docstring）
+    #: 级三缺失丢弃（R13；级三未实现，本增量把处置口接到这个计数位）
     tier3_missing_drops: int
+    #: 在途块被再次调度（换出/换入）而被拒的次数（在途块不得二次调度）
+    inflight_reschedule_rejected: int
 
 
 @dataclass(frozen=True)
@@ -490,6 +536,108 @@ class TierDestroyReport:
     timed_out: bool
 
 
+# ----------------------------------------------------------------------
+# 异步在途轨的视图（本增量）：发起即返回的回执 + 在途账本的可查状态 + 轮询产出
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TransferTicket:
+    """在途账本的一条（query_transfers 的产出）：搬运中的块/条目的明确「在途」状态与跟踪。"""
+
+    transfer_id: str
+    direction: TransferDirection
+    entry_id: str
+    block_id: int
+    nbytes: int
+    started_at: float
+    polls: int
+    state: TransferState
+    error: str | None
+
+
+@dataclass(frozen=True)
+class AsyncEvictReceipt:
+    """evict_async 的产出：**发起即返回**。
+
+    `scheduled_*` 是「已发起在途」的量，不是已换出量——完成确认（poll_transfers）
+    之前，条目不落级二账本、块不归还池（T-7）；实际换出量看审计与水位。
+    未达目标如实标注（T-4）。"""
+
+    scheduled_bytes: int
+    scheduled_entries: tuple[str, ...]
+    transfers: tuple[TransferTicket, ...]
+    met_target: bool
+    reason: str
+    ordering_basis: tuple[str, ...] = ()
+    bypassed_residency: int = 0
+
+
+@dataclass(frozen=True)
+class AsyncPromoteReceipt:
+    """promote_async 的产出：块已向池预留但**未确认完成**——块标识与底座引用在
+    完成确认时才交付（poll_transfers 的 TransferOutcome.promoted，T-7 第 5 步：
+    未确认完成就交出去 = 交出一块内容不全的显存）。"""
+
+    entry_id: str
+    nbytes: int
+    transfer_id: str
+
+
+@dataclass(frozen=True)
+class TransferOutcome:
+    """poll_transfers 的一条：一次非阻塞轮询里对一笔在途搬运的判定。"""
+
+    transfer_id: str
+    direction: TransferDirection
+    entry_id: str
+    block_id: int
+    nbytes: int
+    state: TransferState
+    polls: int = 0
+    #: 换入完成时交付的块（direction = PROMOTE 且 state = CONFIRMED 才有）
+    promoted: PromoteResult | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class TransferPollReport:
+    """poll_transfers 的产出：本次轮询的全部判定 + 仍在途清单（可观测面）。"""
+
+    outcomes: tuple[TransferOutcome, ...]
+    still_in_flight: tuple[TransferTicket, ...]
+
+    @property
+    def confirmed(self) -> tuple[TransferOutcome, ...]:
+        return tuple(o for o in self.outcomes if o.state is TransferState.CONFIRMED)
+
+    @property
+    def failed(self) -> tuple[TransferOutcome, ...]:
+        return tuple(o for o in self.outcomes if o.state is TransferState.FAILED)
+
+
+# ----------------------------------------------------------------------
+# 级三留位的处置视图（本增量；设计第八节第 2 条：只定位置，不承诺实现）
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Tier3DispositionReport:
+    """apply_r13_disposition 的产出：R13 处置（级二高水位 ⇒ 本应换出到级三）。
+
+    级三未实现 ⇒ 按级二淘汰策略（现状 LRU，evicted_at 最旧先丢——实现可调参数，
+    不是冻结口径，设计第八节第 6 条）丢弃并计入审计（tier3_missing_drops）。
+    `backend_registered` 恒 False：这是**留位**——槽位在、后端未实现。"""
+
+    #: 处置目标级别（恒 TIER3，留位）
+    target: TierLevel
+    #: 级三后端是否已注册（恒 False；将来实现级三后端时此槽位即为接线点）
+    backend_registered: bool
+    dropped_entries: tuple[str, ...]
+    dropped_bytes: int
+    reason: str
+
+
 # ======================================================================
 # 本体
 # ======================================================================
@@ -498,6 +646,65 @@ class TierDestroyReport:
 #: 完成确认的轮询上限（同步完成确认的实现细节；屏障只许超时+轮询，不许阻塞等待，T-7）
 _CONFIRM_POLLS = 8
 _CONFIRM_INTERVAL_S = 0.0
+
+#: 异步在途轨的问询预算：同一笔搬运被问询满这个次数仍未确认 ⇒ 状态转 TIMED_OUT
+#: （可恢复态：**留在在途表**可继续轮询，不算失败——T-7 / 池的 I-11「超时不等于失败」）。
+#: 这是主机侧机制预算，不是芯片相关阈值（T-9 管的是搬运粒度与水位默认值）。
+_PENDING_TIMEOUT_POLLS = 8
+
+#: destroy 排空在途时的轮询间隔（秒）。只许超时+轮询，不许无限阻塞（T-7）。
+_DRAIN_POLL_INTERVAL_S = 0.001
+
+
+@dataclass
+class _TransferRecord:
+    """在途账本的内部记录（可变；对外只经 `TransferTicket` 视图暴露）。"""
+
+    transfer_id: str
+    direction: TransferDirection
+    entry_id: str
+    block_id: int
+    nbytes: int
+    ticket: Any
+    started_at: float
+    #: 发起搬运用的搬运流（finalize 时 drain 用同一条流）
+    stream_id: int
+    #: 候选排序依据（换出方向；R9 / R7 / R10）
+    rule: str
+    #: 越过最小驻留窗的换出（E2 可越窗但要计审计）
+    bypassed_residency: int
+    #: 换入方向：完成后是否保留级二副本
+    keep_tier2_copy: bool
+    #: 换入方向：完成时交付的底座引用（promote_async 发起时从池租约取得）
+    base_ref: Any = None
+    polls: int = 0
+    state: TransferState = TransferState.PENDING
+    error: str | None = None
+
+    def view(self) -> TransferTicket:
+        return TransferTicket(
+            transfer_id=self.transfer_id,
+            direction=self.direction,
+            entry_id=self.entry_id,
+            block_id=self.block_id,
+            nbytes=self.nbytes,
+            started_at=self.started_at,
+            polls=self.polls,
+            state=self.state,
+            error=self.error,
+        )
+
+    def outcome(self, state: TransferState) -> TransferOutcome:
+        return TransferOutcome(
+            transfer_id=self.transfer_id,
+            direction=self.direction,
+            entry_id=self.entry_id,
+            block_id=self.block_id,
+            nbytes=self.nbytes,
+            state=state,
+            polls=self.polls,
+            error=self.error,
+        )
 
 #: 审计计数器的字段集合（避免手写 dict 漂移）
 _AUDIT_FIELDS = (
@@ -516,6 +723,7 @@ _AUDIT_FIELDS = (
     "copy_failures",
     "cross_stream_declarations",
     "tier3_missing_drops",
+    "inflight_reschedule_rejected",
 )
 
 
@@ -590,7 +798,10 @@ class TierManager:
         # 预算闸的滑动窗口与空转退避
         self._budget_events: deque[tuple[float, int]] = deque()
         self._idle_rounds = 0
-        self._in_flight: set[str] = set()
+        # 在途账本（异步轨）：transfer_id -> 记录。搬运中的块/条目在这里有明确
+        # 「在途」状态；完成确认后才变更归属（T-7 的异步形态）。
+        self._transfers: dict[str, _TransferRecord] = {}
+        self._transfer_seq = 0
         self._audit = {name: 0 for name in _AUDIT_FIELDS}
         self._destroyed = False
 
@@ -601,6 +812,11 @@ class TierManager:
     @property
     def destroyed(self) -> bool:
         return self._destroyed
+
+    @property
+    def _in_flight(self) -> set[str]:
+        """在途搬运的条目号集合（destroy 的报错清单等粗粒度口径；详态走 query_transfers）。"""
+        return {record.entry_id for record in self._transfers.values()}
 
     def attach_stream(self, stream: Any) -> int:
         """把一条搬运流经池 register_stream 登记并由池强持有（T-6 / 3.4 换出第 1 步）。"""
@@ -656,6 +872,126 @@ class TierManager:
         if block_owner is not None and self._copy_stream_id != block_owner:
             self._pool.declare_cross_stream_use(block_id, self._copy_stream_id)
             self._audit["cross_stream_declarations"] += 1
+
+    # —— 换出/换入的公共判读件（同步轨与异步轨共用，语义一字不差）——
+
+    def _evict_gate(
+        self, *, forced: bool, watermark: Watermark
+    ) -> EvictResult | None:
+        """E1 双指标触发判读。返回 None = 通过；返回 EvictResult = 不触发（含空转退避计数）。"""
+        if not forced:
+            zone, _, _ = self._zone(watermark)
+            if zone != "高":
+                self._idle_rounds += 1
+                if self._idle_rounds >= self._policy.backoff_trigger_max:
+                    self._audit["backoff_deferrals"] += 1
+                return EvictResult(
+                    evicted_bytes=0,
+                    evicted_entries=(),
+                    met_target=False,
+                    reason=f"双指标水位未同时到高水位（当前区间 {zone}，T-1），不换出",
+                )
+        return None
+
+    def _collect_candidates(
+        self, candidates: Iterable[int]
+    ) -> tuple[list[tuple[int, int]], int, bool, int]:
+        """候选收集与 R9→R10 排序（2.2 / E1 条件③）。
+
+        返回 (ordered[(排序键, block_id)], R1..R5 跳过数, 判据 4/5 缺失标记, 在途跳过数)。
+        在途块不得被二次调度：有在途搬运记录的块跳过并计审计（异步轨的核心不变量）。
+        副本保留产生的条目号冲突（b<block_id> 已在级二账本）同样跳过——宁可拒绝。"""
+        ordered: list[tuple[int, int]] = []
+        skipped_labels = 0
+        stats_missing = False
+        inflight_skipped = 0
+        active_blocks = {r.block_id for r in self._transfers.values()}
+        for block_id in candidates:
+            view = self._pool.block_view(block_id)
+            if view.purpose != Purpose.KV_CACHE:
+                skipped_labels += 1  # R1..R5：不进分层（T-3）
+                continue
+            if block_id in active_blocks or f"b{block_id}" in self._entries:
+                # 在途块不得被二次调度；副本保留中/已在级二的条目号不覆盖
+                inflight_skipped += 1
+                self._audit["inflight_reschedule_rejected"] += 1
+                continue
+            stats = self._backend.block_activity(block_id)
+            if stats is None:
+                stats_missing = True
+                ordered.append((1, block_id))  # 判据 4/5 缺失：中性序（降级可查）
+            elif stats.hits == 0 and stats.reuse_distance > 0:
+                ordered.append((0, block_id))  # R9：冷且久未用，最前
+            else:
+                ordered.append((2, block_id))  # R10/R12：热条目最后
+        ordered.sort(key=lambda item: item[0])
+        return ordered, skipped_labels, stats_missing, inflight_skipped
+
+    def _level2_committed(self) -> int:
+        """级二承诺量 = 已确认条目 + 换出在途（确认后即落账本）。容量判读用它（保守：
+        在途换出按将占用计，避免排空时超容量——T-4 不静默超发）。"""
+        return self._level2_used() + sum(
+            r.nbytes
+            for r in self._transfers.values()
+            if r.direction is TransferDirection.EVICT
+        )
+
+    def _require_promotable(self, entry_id: str, *, operation: str) -> Tier2Entry:
+        """换入的条目查账（同步/异步共用）。在途条目显式拒绝，不静默当未命中（T-4）。"""
+        entry = self._entries.get(entry_id)
+        active = [r for r in self._transfers.values() if r.entry_id == entry_id]
+        if entry is None:
+            out_ids = [
+                r.transfer_id
+                for r in active
+                if r.direction is TransferDirection.EVICT
+            ]
+            if out_ids:
+                raise TierError(
+                    f"条目 {entry_id!r} 正在换出在途（{out_ids}），完成确认前不在级二"
+                    f"账本，{operation} 拒绝（不静默当未命中，T-4 / T-7）。"
+                )
+            raise TierError(
+                f"条目不在级二：{entry_id!r}（{operation} 不静默当未命中，T-4）。"
+            )
+        in_ids = [
+            r.transfer_id
+            for r in active
+            if r.direction is TransferDirection.PROMOTE
+        ]
+        if in_ids:
+            raise TierError(
+                f"条目 {entry_id!r} 已有换入在途（{in_ids}），重复调度被拒。"
+            )
+        return entry
+
+    def _promote_prefetch_gate(
+        self, entry: Tier2Entry, watermark: Watermark
+    ) -> CooldownRejected | PrefetchNotTriggered | None:
+        """I2 预取门禁（同步/异步共用）：双指标低水位 + 冷却窗 + 预算闸（T-1 / T-2）。"""
+        zone, dev_occ, eng_occ = self._zone(watermark)
+        if zone != "低":
+            return PrefetchNotTriggered(
+                entry_id=entry.entry_id,
+                device_occupancy=dev_occ,
+                engine_occupancy=eng_occ,
+            )
+        # 冷却窗：刚换出的条目不作预取候选；真实请求召回（I1）不受此限（T-2）
+        cooldown = time.monotonic() - entry.evicted_at
+        if cooldown < self._policy.cooldown_s:
+            self._audit["cooldown_rejected_prefetch"] += 1
+            return CooldownRejected(
+                entry_id=entry.entry_id,
+                remaining_s=self._policy.cooldown_s - cooldown,
+            )
+        if not self._budget_allows(entry.nbytes):
+            self._audit["budget_gate_deferred"] += 1
+            return PrefetchNotTriggered(
+                entry_id=entry.entry_id,
+                device_occupancy=dev_occ,
+                engine_occupancy=eng_occ,
+            )
+        return None
 
     # ------------------------------------------------------------------
     # 操作 4：classify_placement（只判不动，2.3）
@@ -832,36 +1168,13 @@ class TierManager:
         if watermark.device_total <= 0:
             raise TierConfigError("池的设备侧三键不可用（T-1），无法做换出判读。")
         # E1 触发判读：双指标两侧同时越高水位才触发（T-1）；E2（压力回收）不查水位
-        if not forced:
-            zone, _, _ = self._zone(watermark)
-            if zone != "高":
-                self._idle_rounds += 1
-                if self._idle_rounds >= self._policy.backoff_trigger_max:
-                    self._audit["backoff_deferrals"] += 1
-                return EvictResult(
-                    evicted_bytes=0,
-                    evicted_entries=(),
-                    met_target=False,
-                    reason=f"双指标水位未同时到高水位（当前区间 {zone}，T-1），不换出",
-                )
-        # 候选收集：R1..R5 的标签永不出现在候选里；按 R9→R10 排序
-        ordered: list[tuple[int, int]] = []  # (排序键, block_id)
-        skipped_labels = 0
-        stats_missing = False
-        for block_id in candidates:
-            view = self._pool.block_view(block_id)
-            if view.purpose != Purpose.KV_CACHE:
-                skipped_labels += 1  # R1..R5：不进分层（T-3）
-                continue
-            stats = self._backend.block_activity(block_id)
-            if stats is None:
-                stats_missing = True
-                ordered.append((1, block_id))  # 判据 4/5 缺失：中性序（降级可查）
-            elif stats.hits == 0 and stats.reuse_distance > 0:
-                ordered.append((0, block_id))  # R9：冷且久未用，最前
-            else:
-                ordered.append((2, block_id))  # R10/R12：热条目最后
-        ordered.sort(key=lambda item: item[0])
+        gate = self._evict_gate(forced=forced, watermark=watermark)
+        if gate is not None:
+            return gate
+        # 候选收集：R1..R5 的标签永不出现在候选里；按 R9→R10 排序；在途块拒入
+        ordered, skipped_labels, stats_missing, inflight_skipped = (
+            self._collect_candidates(candidates)
+        )
         if not ordered:
             self._idle_rounds += 1
             if self._idle_rounds >= self._policy.backoff_trigger_max:
@@ -869,6 +1182,8 @@ class TierManager:
             reason = "无可换出候选"
             if skipped_labels:
                 reason += f"（{skipped_labels} 个候选属 R1..R5 永不下放标签，T-3）"
+            if inflight_skipped:
+                reason += f"（{inflight_skipped} 个候选正在途，二次调度被拒）"
             return EvictResult(
                 evicted_bytes=0,
                 evicted_entries=(),
@@ -887,8 +1202,9 @@ class TierManager:
                 break
             view = self._pool.block_view(block_id)
             nbytes = view.tier_bytes
-            # 级二容量不足 ⇒ 停，如实标注未达目标（T-4）
-            if self._level2_used() + nbytes > self._level2_capacity:
+            # 级二容量不足 ⇒ 停，如实标注未达目标（T-4）。
+            # 判读用承诺量（已确认 + 换出在途），异步在途按将占用计（保守）。
+            if self._level2_committed() + nbytes > self._level2_capacity:
                 reason = "级二容量不足，停止换出"
                 break
             # 预算闸（3.3 第 4 条）
@@ -913,7 +1229,6 @@ class TierManager:
             # 步 2：跨流声明（搬运流与分配流不同时）
             self._declare_cross_stream(block_id, view.owner_stream)
             # 步 3：在搬运流上发起 D2H 逐块拷贝
-            self._in_flight.add(entry_id)
             try:
                 ticket = self._backend.copy_out(
                     entry_id, block_id, nbytes, stream_id=self._copy_stream_id
@@ -941,8 +1256,6 @@ class TierManager:
                     f"换出条目 {entry_id} 拷贝失败（{exc!r}）；条目不落级二账本、"
                     f"不调 free_block，块留在用（3.5 / T-7）。"
                 ) from exc
-            finally:
-                self._in_flight.discard(entry_id)
             # 步 6：推进待回收（drain 超时是可恢复态，不算失败）
             self._pool.drain_stream(stream_id=self._copy_stream_id, timeout_s=0.0)
             self._budget_charge(nbytes)
@@ -983,9 +1296,7 @@ class TierManager:
     ) -> PromoteOutcome:
         self._require_backend()
         self._audit["promote_calls"] += 1
-        entry = self._entries.get(entry_id)
-        if entry is None:
-            raise TierError(f"条目不在级二：{entry_id!r}（promote 不静默当未命中，T-4）。")
+        entry = self._require_promotable(entry_id, operation="promote")
         watermark = self._pool.query_watermark()
         if watermark.device_total <= 0:
             raise TierConfigError("池的设备侧三键不可用（T-1），无法做换入判读。")
@@ -994,29 +1305,9 @@ class TierManager:
                 f"搬运流 {stream_id} 未登记（T-6）：请先 attach_stream / register_stream。"
             )
         if prefetch:
-            # I2 预取：双指标低水位同时满足才允许（T-1）
-            zone, dev_occ, eng_occ = self._zone(watermark)
-            if zone != "低":
-                return PrefetchNotTriggered(
-                    entry_id=entry_id,
-                    device_occupancy=dev_occ,
-                    engine_occupancy=eng_occ,
-                )
-            # 冷却窗：刚换出的条目不作预取候选；真实请求召回（I1）不受此限（T-2）
-            cooldown = time.monotonic() - entry.evicted_at
-            if cooldown < self._policy.cooldown_s:
-                self._audit["cooldown_rejected_prefetch"] += 1
-                return CooldownRejected(
-                    entry_id=entry_id,
-                    remaining_s=self._policy.cooldown_s - cooldown,
-                )
-            if not self._budget_allows(entry.nbytes):
-                self._audit["budget_gate_deferred"] += 1
-                return PrefetchNotTriggered(
-                    entry_id=entry_id,
-                    device_occupancy=dev_occ,
-                    engine_occupancy=eng_occ,
-                )
+            gate = self._promote_prefetch_gate(entry, watermark)
+            if gate is not None:
+                return gate
         # —— 换入五步（3.4）——
         # 步 1：向池要块，用途标签 = KV 缓存；容量不足 ⇒ 报错，不许当未命中（T-4）
         try:
@@ -1025,7 +1316,6 @@ class TierManager:
             )
         except CapacityExhausted as exc:
             raise PromoteCapacityExhausted(entry.nbytes, exc.watermark) from exc
-        self._in_flight.add(entry_id)
         try:
             # 步 2：跨流声明
             self._declare_cross_stream(block.block_id, block.owner_stream)
@@ -1047,8 +1337,6 @@ class TierManager:
             raise TierCopyFailed(
                 f"换入条目 {entry_id} 拷贝失败（{exc!r}）；已归还块 {block.block_id}（3.5）。"
             ) from exc
-        finally:
-            self._in_flight.discard(entry_id)
         # 步 5：**确认完成后**才把块交调用方（T-7）；级二副本按策略保留或释放
         if keep_tier2_copy:
             self._entries[entry_id] = replace(entry, replica_kept=True)
@@ -1065,6 +1353,368 @@ class TierManager:
             base_ref=block.storage_id,
             nbytes=entry.nbytes,
             kept_tier2_copy=keep_tier2_copy,
+        )
+
+    # ------------------------------------------------------------------
+    # 异步在途轨（本增量）：发起即返回，完成确认（poll）后才变更归属（T-7 的异步形态）
+    # ------------------------------------------------------------------
+
+    def evict_async(
+        self,
+        candidates: Iterable[int],
+        *,
+        target_bytes: int | None = None,
+        pressure: PressureLevel | None = None,
+        stream_id: int | None = None,
+        allow_bypass_min_residency: bool = False,
+    ) -> AsyncEvictReceipt:
+        """异步换出：判读与候选排序与 `evict` 完全一致，但**发起即返回**。
+
+        换出六步里只做第 2 步（跨流声明）与第 3 步（发起 D2H）；第 4..6 步
+        （完成确认、账本先行、还块推进屏障）推迟到 `poll_transfers` 的完成确认。
+        预算闸按**发起**记账（在途搬运占拷贝带宽，保守）；级二容量按承诺量判读
+        （已确认 + 换出在途）。发起期失败（copy_out 抛错 / 无完成凭据）按 3.5：
+        该条目不落账本、不还块，此前已发起的在途搬运不受影响、仍在表。"""
+        self._require_backend()
+        self._audit["evict_calls"] += 1
+        if target_bytes is None and pressure is None:
+            raise TierError("evict_async 需要 target_bytes 或 pressure 至少其一（E2 口径）。")
+        if stream_id is not None and stream_id not in self._known_streams:
+            raise CrossStreamUndeclared(
+                f"搬运流 {stream_id} 未登记（T-6）：请先 attach_stream / register_stream。"
+            )
+        if stream_id is not None:
+            self._copy_stream_id = stream_id
+        forced = pressure is not None
+        watermark = self._pool.query_watermark()
+        if watermark.device_total <= 0:
+            raise TierConfigError("池的设备侧三键不可用（T-1），无法做换出判读。")
+        gate = self._evict_gate(forced=forced, watermark=watermark)
+        if gate is not None:
+            return AsyncEvictReceipt(
+                scheduled_bytes=0,
+                scheduled_entries=(),
+                transfers=(),
+                met_target=False,
+                reason=gate.reason,
+            )
+        ordered, skipped_labels, stats_missing, inflight_skipped = (
+            self._collect_candidates(candidates)
+        )
+        if not ordered:
+            self._idle_rounds += 1
+            if self._idle_rounds >= self._policy.backoff_trigger_max:
+                self._audit["backoff_deferrals"] += 1
+            reason = "无可换出候选"
+            if skipped_labels:
+                reason += f"（{skipped_labels} 个候选属 R1..R5 永不下放标签，T-3）"
+            if inflight_skipped:
+                reason += f"（{inflight_skipped} 个候选正在途，二次调度被拒）"
+            return AsyncEvictReceipt(
+                scheduled_bytes=0,
+                scheduled_entries=(),
+                transfers=(),
+                met_target=False,
+                reason=reason,
+            )
+        self._idle_rounds = 0  # 有候选，空转退避立即复位（3.3 第 4 条）
+        scheduled_bytes = 0
+        scheduled: list[str] = []
+        basis: list[str] = []
+        bypassed = 0
+        reason = ""
+        tickets: list[TransferTicket] = []
+        now = time.monotonic()
+        for rank, block_id in ordered:
+            if target_bytes is not None and scheduled_bytes >= target_bytes:
+                break
+            view = self._pool.block_view(block_id)
+            nbytes = view.tier_bytes
+            # 级二容量按承诺量判读：在途换出按将占用计（保守，防排空时超容量）
+            if self._level2_committed() + nbytes > self._level2_capacity:
+                reason = "级二容量不足，停止换出"
+                break
+            if not self._budget_allows(nbytes):
+                self._audit["budget_gate_deferred"] += 1
+                reason = "搬运预算闸：窗口内字节数到上限"
+                break
+            promoted_at = self._promoted_at.get(block_id)
+            bypassed_this = 0
+            if (
+                promoted_at is not None
+                and now - promoted_at < self._policy.min_residency_s
+            ):
+                if forced and allow_bypass_min_residency:
+                    bypassed += 1
+                    bypassed_this = 1
+                else:
+                    self._audit["min_residency_deferred"] += 1
+                    continue
+            rule = {0: "R9", 1: "R7", 2: "R10"}[rank]
+            entry_id = f"b{block_id}"
+            # —— 换出六步的异步前段（3.4）：步 2 跨流声明 + 步 3 发起 D2H ——
+            self._declare_cross_stream(block_id, view.owner_stream)
+            try:
+                ticket = self._backend.copy_out(
+                    entry_id, block_id, nbytes, stream_id=self._copy_stream_id
+                )
+                if ticket is None:
+                    # 无完成凭据：永远无法确认，按发起失败处置（T-4 不静默挂起）
+                    raise TierCopyFailed(
+                        f"换出条目 {entry_id} 发起失败：搬运后端未返回完成凭据；"
+                        f"条目不落级二账本、不调 free_block，块留在用（3.5 / T-7）。"
+                    )
+            except TierCopyFailed:
+                self._audit["copy_failures"] += 1
+                raise
+            except Exception as exc:
+                self._audit["copy_failures"] += 1
+                raise TierCopyFailed(
+                    f"换出条目 {entry_id} 发起失败（{exc!r}）；条目不落级二账本、"
+                    f"不调 free_block，块留在用（3.5 / T-7）；此前已发起的 "
+                    f"{len(scheduled)} 笔仍在途，经 poll_transfers 处置。"
+                ) from exc
+            self._budget_charge(nbytes)  # 发起即记账：在途搬运占带宽（保守）
+            record = _TransferRecord(
+                transfer_id=self._next_transfer_id(),
+                direction=TransferDirection.EVICT,
+                entry_id=entry_id,
+                block_id=block_id,
+                nbytes=nbytes,
+                ticket=ticket,
+                started_at=time.monotonic(),
+                stream_id=self._copy_stream_id,
+                rule=rule,
+                bypassed_residency=bypassed_this,
+                keep_tier2_copy=False,
+            )
+            self._transfers[record.transfer_id] = record
+            scheduled_bytes += nbytes
+            scheduled.append(entry_id)
+            basis.append(rule)
+            tickets.append(record.view())
+        met_target = target_bytes is None or scheduled_bytes >= target_bytes
+        if not met_target:
+            self._audit["unmet_target_evicts"] += 1
+            reason = reason or "发起量未达目标（如实标注，实际换出量以完成确认为准，T-4）"
+        elif not reason and stats_missing:
+            reason = "部分候选判据 4/5 不可用，按中性序发起（降级，见 query_tier_capability）"
+        if reason == "" and met_target and target_bytes is not None:
+            reason = "达标（发起量；实际换出量以完成确认为准）"
+        if not reason:
+            reason = "发起完成（实际换出量以完成确认为准）"
+        return AsyncEvictReceipt(
+            scheduled_bytes=scheduled_bytes,
+            scheduled_entries=tuple(scheduled),
+            transfers=tuple(tickets),
+            met_target=met_target,
+            reason=reason,
+            ordering_basis=tuple(basis),
+            bypassed_residency=bypassed,
+        )
+
+    def promote_async(
+        self,
+        entry_id: str,
+        *,
+        stream_id: int | None = None,
+        keep_tier2_copy: bool = False,
+        prefetch: bool = False,
+    ) -> AsyncPromoteReceipt | CooldownRejected | PrefetchNotTriggered:
+        """异步换入：门禁与 `promote` 完全一致，但**发起即返回**。
+
+        换入五步里做第 1..3 步（向池要块、跨流声明、发起 H2D）；第 4..5 步
+        （完成确认、交块）推迟到 `poll_transfers`——块标识与底座引用在完成确认
+        时才经 `TransferOutcome.promoted` 交付（T-7 第 5 步）。发起期失败按 3.5：
+        归还已预留的块，级二条目保留可重试。"""
+        self._require_backend()
+        self._audit["promote_calls"] += 1
+        entry = self._require_promotable(entry_id, operation="promote_async")
+        watermark = self._pool.query_watermark()
+        if watermark.device_total <= 0:
+            raise TierConfigError("池的设备侧三键不可用（T-1），无法做换入判读。")
+        if stream_id is not None and stream_id not in self._known_streams:
+            raise CrossStreamUndeclared(
+                f"搬运流 {stream_id} 未登记（T-6）：请先 attach_stream / register_stream。"
+            )
+        if prefetch:
+            gate = self._promote_prefetch_gate(entry, watermark)
+            if gate is not None:
+                return gate
+        # —— 换入五步的异步前段（3.4）：步 1 要块 + 步 2 跨流声明 + 步 3 发起 H2D ——
+        try:
+            block = self._pool.alloc_on_stream(
+                entry.nbytes, stream_id=stream_id, purpose=Purpose.KV_CACHE
+            )
+        except CapacityExhausted as exc:
+            raise PromoteCapacityExhausted(entry.nbytes, exc.watermark) from exc
+        try:
+            self._declare_cross_stream(block.block_id, block.owner_stream)
+            ticket = self._backend.copy_in(
+                entry_id, block.block_id, entry.nbytes, stream_id=self._copy_stream_id
+            )
+            if ticket is None:
+                raise TierCopyFailed(
+                    f"换入条目 {entry_id} 发起失败：搬运后端未返回完成凭据；"
+                    f"归还预留块后报错（3.5 / T-7）。"
+                )
+        except Exception as exc:
+            self._audit["copy_failures"] += 1
+            self._pool.free_block(block.block_id)
+            if isinstance(exc, TierCopyFailed):
+                raise
+            raise TierCopyFailed(
+                f"换入条目 {entry_id} 发起失败（{exc!r}）；已归还预留块 "
+                f"{block.block_id}（3.5）。"
+            ) from exc
+        self._budget_charge(entry.nbytes)  # 发起即记账（保守，与 evict_async 同口径）
+        record = _TransferRecord(
+            transfer_id=self._next_transfer_id(),
+            direction=TransferDirection.PROMOTE,
+            entry_id=entry_id,
+            block_id=block.block_id,
+            nbytes=entry.nbytes,
+            ticket=ticket,
+            started_at=time.monotonic(),
+            stream_id=self._copy_stream_id,
+            rule="",
+            bypassed_residency=0,
+            keep_tier2_copy=keep_tier2_copy,
+            base_ref=block.storage_id,
+        )
+        self._transfers[record.transfer_id] = record
+        return AsyncPromoteReceipt(
+            entry_id=entry_id, nbytes=entry.nbytes, transfer_id=record.transfer_id
+        )
+
+    def poll_transfers(self) -> TransferPollReport:
+        """在途搬运的一次非阻塞轮询（T-7：超时 + 轮询，不阻塞等待）。
+
+        每笔在途搬运问询一次完成确认：
+        - 确认通过 ⇒ **此刻才变更归属**——换出：条目先落级二账本、后 free_block、
+          推进屏障（六步的第 4..6 步）；换入：交块（五步的第 4..5 步）；
+        - 未确认 ⇒ 仍在途；问询预算耗尽转 TIMED_OUT（可恢复态，留在表里，不算失败）；
+        - confirm 抛错 ⇒ 确认期失败，回收路径按 3.5（换出不落账不还块、
+          换入归还预留块），条目出表后可重新调度。"""
+        self._require_backend()
+        outcomes: list[TransferOutcome] = []
+        for record in list(self._transfers.values()):
+            try:
+                done = self._backend.confirm(record.ticket)
+            except Exception as exc:
+                outcomes.append(self._fail_transfer(record, exc))
+                continue
+            if done:
+                outcomes.append(self._finalize_transfer(record))
+            else:
+                record.polls += 1
+                if (
+                    record.state is not TransferState.TIMED_OUT
+                    and record.polls >= _PENDING_TIMEOUT_POLLS
+                ):
+                    record.state = TransferState.TIMED_OUT
+                outcomes.append(record.outcome(record.state))
+        return TransferPollReport(
+            outcomes=tuple(outcomes),
+            still_in_flight=tuple(r.view() for r in self._transfers.values()),
+        )
+
+    def query_transfers(
+        self, *, entry_id: str | None = None
+    ) -> tuple[TransferTicket, ...]:
+        """在途账本的可查视图（「在途」状态与跟踪的观测面）；可按条目过滤。"""
+        self._require_open()
+        return tuple(
+            record.view()
+            for record in self._transfers.values()
+            if entry_id is None or record.entry_id == entry_id
+        )
+
+    # —— 异步在途轨的内部结算 ——
+
+    def _next_transfer_id(self) -> str:
+        self._transfer_seq += 1
+        return f"tx-{self._transfer_seq}"
+
+    def _finalize_transfer(self, record: _TransferRecord) -> TransferOutcome:
+        """完成确认通过后的归属变更（每笔只结算一次：先出表，再动账本/交块）。"""
+        self._transfers.pop(record.transfer_id, None)
+        record.state = TransferState.CONFIRMED
+        if record.direction is TransferDirection.EVICT:
+            # 步 5：条目**先**落级二账本，**后** free_block（账本先行，T-7）
+            self._entries[record.entry_id] = Tier2Entry(
+                entry_id=record.entry_id,
+                block_id=record.block_id,
+                nbytes=record.nbytes,
+                evicted_at=time.monotonic(),
+            )
+            self._pool.free_block(record.block_id)
+            # 步 6：推进待回收（drain 超时是可恢复态，不算失败）；用发起时的搬运流
+            self._pool.drain_stream(stream_id=record.stream_id, timeout_s=0.0)
+            self._audit["evicted_bytes"] += record.nbytes
+            self._audit["evicted_entries"] += 1
+            self._audit["bypass_window_evicts"] += record.bypassed_residency
+            return record.outcome(TransferState.CONFIRMED)
+        # 换入：确认完成后才把块交调用方（T-7 第 5 步）；级二副本按策略保留或释放
+        if record.keep_tier2_copy:
+            entry = self._entries.get(record.entry_id)
+            if entry is not None:
+                self._entries[record.entry_id] = replace(entry, replica_kept=True)
+            else:  # pragma: no cover - 防御：处置口跳过在途换入，正常不会走到
+                self._backend.drop_entry(record.entry_id)
+        else:
+            self._entries.pop(record.entry_id, None)
+            self._backend.drop_entry(record.entry_id)
+        self._promoted_at[record.block_id] = time.monotonic()
+        self._audit["promoted_bytes"] += record.nbytes
+        self._audit["promoted_entries"] += 1
+        result = PromoteResult(
+            entry_id=record.entry_id,
+            block_id=record.block_id,
+            base_ref=record.base_ref,
+            nbytes=record.nbytes,
+            kept_tier2_copy=record.keep_tier2_copy,
+        )
+        return TransferOutcome(
+            transfer_id=record.transfer_id,
+            direction=record.direction,
+            entry_id=record.entry_id,
+            block_id=record.block_id,
+            nbytes=record.nbytes,
+            state=TransferState.CONFIRMED,
+            polls=record.polls,
+            promoted=result,
+        )
+
+    def _fail_transfer(self, record: _TransferRecord, exc: Exception) -> TransferOutcome:
+        """确认期失败的回收（3.5）：条目出表（可重新调度），预算不退（带宽已耗，保守）。"""
+        self._transfers.pop(record.transfer_id, None)
+        record.state = TransferState.FAILED
+        record.error = repr(exc)
+        self._audit["copy_failures"] += 1
+        if record.direction is TransferDirection.EVICT:
+            # 发起时就没动账本没还块（异步前段只发起拷贝），此处保持：块留在用
+            message = (
+                f"换出条目 {record.entry_id} 在确认期失败（{exc!r}）；条目不落级二"
+                f"账本、不调 free_block，块留在用（3.5 / T-7）。"
+            )
+        else:
+            # 换入：归还预留块，级二条目保留可重试
+            self._pool.free_block(record.block_id)
+            message = (
+                f"换入条目 {record.entry_id} 在确认期失败（{exc!r}）；已归还预留块 "
+                f"{record.block_id}，级二条目保留可重试（3.5 / T-7）。"
+            )
+        outcome = record.outcome(TransferState.FAILED)
+        return TransferOutcome(
+            transfer_id=outcome.transfer_id,
+            direction=outcome.direction,
+            entry_id=outcome.entry_id,
+            block_id=outcome.block_id,
+            nbytes=outcome.nbytes,
+            state=TransferState.FAILED,
+            polls=outcome.polls,
+            error=message,
         )
 
     # ------------------------------------------------------------------
@@ -1100,6 +1750,8 @@ class TierManager:
                 self._probed.transfer_granularity_bytes if self._probed else 0
             ),
             backoff_rounds=self._idle_rounds,
+            # 级三后端留位槽：恒 False（结构留位，设计第八节第 2 条，不承诺实现）
+            tier3_backend_registered=False,
         )
 
     def query_tier_audit(self) -> TierAuditView:
@@ -1118,18 +1770,104 @@ class TierManager:
         return self._policy
 
     # ------------------------------------------------------------------
+    # 级三留位（本增量）：R13 处置口（设计第八节第 2 条——只定位置，不承诺实现）
+    # ------------------------------------------------------------------
+
+    def apply_r13_disposition(self) -> Tier3DispositionReport:
+        """R13 处置：级二高水位 ⇒ 本应换出到级三；级三未实现（留位）⇒ 按级二
+        淘汰策略丢弃并计入审计（tier3_missing_drops，E4 的「级三缺失丢弃」计数）。
+
+        淘汰策略现状 = LRU（evicted_at 最旧先丢）——它是实现可调参数，不是冻结
+        口径（设计第八节第 6 条）。有换入在途的条目不丢（级二副本是 H2D 的数据源，
+        丢了就是在途搬运读悬空内存）。空处置（未到高水位）显式给原因，不报成功（T-4）。"""
+        self._require_backend()
+        level2 = self._level2_view()
+        if level2.occupancy < self._policy.level2_high_watermark:
+            return Tier3DispositionReport(
+                target=TierLevel.TIER3,
+                backend_registered=False,
+                dropped_entries=(),
+                dropped_bytes=0,
+                reason=(
+                    f"级二未到高水位（{level2.occupancy:.2f} < "
+                    f"{self._policy.level2_high_watermark}），无需 R13 处置"
+                ),
+            )
+        active_in = {
+            record.entry_id
+            for record in self._transfers.values()
+            if record.direction is TransferDirection.PROMOTE
+        }
+        skipped_inflight = sum(1 for entry_id in active_in if entry_id in self._entries)
+        threshold_bytes = self._policy.level2_high_watermark * self._level2_capacity
+        droppable = sorted(
+            (e for e in self._entries.values() if e.entry_id not in active_in),
+            key=lambda entry: entry.evicted_at,
+        )
+        dropped: list[str] = []
+        dropped_bytes = 0
+        for entry in droppable:
+            if self._level2_used() - dropped_bytes <= threshold_bytes:
+                break  # 丢到回到高水位以下即停
+            self._entries.pop(entry.entry_id, None)
+            self._backend.drop_entry(entry.entry_id)
+            dropped.append(entry.entry_id)
+            dropped_bytes += entry.nbytes
+            self._audit["tier3_missing_drops"] += 1
+        reason = (
+            f"级三未实现（留位）：按级二淘汰策略（LRU）丢弃 {len(dropped)} 条、"
+            f"共 {dropped_bytes} 字节，计入级三缺失丢弃审计"
+        )
+        if skipped_inflight:
+            reason += f"；{skipped_inflight} 条有换入在途，暂不丢弃"
+        return Tier3DispositionReport(
+            target=TierLevel.TIER3,
+            backend_registered=False,
+            dropped_entries=tuple(dropped),
+            dropped_bytes=dropped_bytes,
+            reason=reason,
+        )
+
+    # ------------------------------------------------------------------
     # 操作 2 / 3：销毁与后端注册
     # ------------------------------------------------------------------
 
     def destroy(
         self, *, wait_for_drain: bool = True, timeout_s: float | None = None
     ) -> TierDestroyReport:
+        """销毁：排空在途搬运、给出级二残留条目与未回级一的块清单（6.1 第 2 条）。
+
+        - `wait_for_drain=False` 且存在在途 ⇒ 报错并附清单，不静默丢弃；
+        - `wait_for_drain=True`：轮询推进在途搬运（只许超时+轮询，T-7），
+          `timeout_s=None` 表示不等待（单次轮询即判）；到时仍在途 ⇒ 返回
+          `timed_out=True` 的可恢复态报告，**不标销毁**，调用方排空后重试；
+        - 在途排空（或本就没有）才标销毁并返回残留清单。"""
         self._require_open()
-        # 在途搬运不静默丢弃：存在即报错并附清单（3.5 总纪律）
-        if self._in_flight:
-            raise TierError(
-                f"存在在途搬运 {sorted(self._in_flight)}，不静默丢弃；排空后重试。"
-            )
+        if self._transfers:
+            if not wait_for_drain:
+                raise TierError(
+                    f"存在在途搬运 {sorted(self._in_flight)}，不静默丢弃；"
+                    f"先 poll_transfers 排空，或以 wait_for_drain=True 重试（6.1 第 2 条）。"
+                )
+            if timeout_s is None:
+                # 未给超时 = 不等待：单次轮询即判，不阻塞（T-7）
+                self.poll_transfers()
+            else:
+                deadline = time.monotonic() + timeout_s
+                while self._transfers:
+                    self.poll_transfers()
+                    if not self._transfers:
+                        break
+                    if time.monotonic() + _DRAIN_POLL_INTERVAL_S >= deadline:
+                        break
+                    time.sleep(_DRAIN_POLL_INTERVAL_S)
+            if self._transfers:
+                # 排空超时：可恢复态上报（T-7「超时不等于失败」），不标销毁
+                return TierDestroyReport(
+                    residual_entries=tuple(self._entries.values()),
+                    in_flight=tuple(sorted(self._in_flight)),
+                    timed_out=True,
+                )
         self._destroyed = True
         return TierDestroyReport(
             residual_entries=tuple(self._entries.values()),

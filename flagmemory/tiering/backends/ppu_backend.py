@@ -43,6 +43,7 @@ from typing import Any
 from flagmemory.tiering.manager import (
     TierBackend,
     TierBackendCapability,
+    TierError,
     TierUnavailable,
 )
 
@@ -134,16 +135,35 @@ class PpuTierBackend:
     def copy_out(
         self, entry_id: str, block_id: int, nbytes: int, *, stream_id: int
     ) -> Any:
-        """级一 → 级二逐块拷贝（store 方向），返回完成凭据。失败抛异常。"""
+        """级一 → 级二逐块拷贝（store 方向），返回完成凭据。失败抛异常。
+
+        发起即把该条目的级二落点行（= 本次 gpu→cpu 的行号）登记进条目账 ——
+        它是 `copy_in` 定位源行的唯一依据（2026-11-10 修复：与昇腾 b3fa22b /
+        昆仑芯 f793a56 同款缺陷在 PPU 栈同构中招，同款修法）。"""
         self._require_bound()
-        return self._launch(block_id, block_id, is_store=True)
+        ticket = self._launch(block_id, block_id, is_store=True)
+        self._tier2_entries[entry_id] = block_id
+        return ticket
 
     def copy_in(
         self, entry_id: str, block_id: int, nbytes: int, *, stream_id: int
     ) -> Any:
-        """级二 → 级一逐块拷贝（load 方向），返回完成凭据。失败抛异常。"""
+        """级二 → 级一逐块拷贝（load 方向），返回完成凭据。失败抛异常。
+
+        契约（T-5/T-7 编排语义，对齐昇腾/昆仑芯已钉死口径）：**源行按条目的
+        级二记录定位**（`copy_out` 发起时登记的落点行，或 `register_entry`
+        预登记的行），**目标行 = 本次传入的 block_id** —— manager 换入时它是
+        新分配块的行号，与源行是两套编号，不得拿 block_id 同时当 src/dst。
+        未知条目按 T-4 报错不静默，绝不退化为「block_id 当源行」。"""
         self._require_bound()
-        return self._launch(block_id, block_id, is_store=False)
+        src_row = self._tier2_entries.get(entry_id)
+        if src_row is None:
+            raise TierError(
+                f"换入条目 {entry_id} 无级二落点记录：copy_in 源行必须按条目定位"
+                "（copy_out 发起登记 / register_entry 预登记），未知条目不静默退化"
+                "为 block_id 当源行（T-4）；请先对该条目发起换出或预登记。"
+            )
+        return self._launch(src_row, block_id, is_store=False)
 
     def confirm(self, ticket: Any) -> bool:
         """事件适配器（设计 §4.1 第 4 条）：只信 record 后入表的事件。

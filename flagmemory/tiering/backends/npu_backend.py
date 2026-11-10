@@ -38,6 +38,7 @@ from typing import Any
 from flagmemory.tiering.manager import (
     TierBackend,
     TierBackendCapability,
+    TierError,
     TierUnavailable,
 )
 
@@ -85,7 +86,9 @@ class NpuTierBackend:
         #: 完成事件表：[(event_idx, event)]，由 copy backend 的后台线程追加
         self._events: list[tuple[int, Any]] = []
         self._event_idx = 0
-        #: 级二侧已登记条目（entry_id -> block_id），drop_entry 的账面
+        #: 级二侧条目账（entry_id -> 级二落点行）：copy_out 发起时登记（外部
+        #: register_entry 可预登记，copy_out 以实际发起覆盖）；copy_in 按它定位
+        #: 源行，drop_entry 撤账
         self._tier2_entries: dict[str, int] = {}
         #: 注册时实测锁页结果（None = 尚未 probe）
         self._probed_pinned: bool | None = None
@@ -118,16 +121,34 @@ class NpuTierBackend:
     def copy_out(
         self, entry_id: str, block_id: int, nbytes: int, *, stream_id: int
     ) -> Any:
-        """级一 → 级二逐块拷贝（store 方向），返回完成凭据。失败抛异常。"""
+        """级一 → 级二逐块拷贝（store 方向），返回完成凭据。失败抛异常。
+
+        发起即把该条目的级二落点行（= 本次 gpu→cpu 的行号）登记进条目账 ——
+        它是 `copy_in` 定位源行的唯一依据。"""
         self._require_bound()
-        return self._launch(block_id, block_id, is_store=True)
+        ticket = self._launch(block_id, block_id, is_store=True)
+        self._tier2_entries[entry_id] = block_id
+        return ticket
 
     def copy_in(
         self, entry_id: str, block_id: int, nbytes: int, *, stream_id: int
     ) -> Any:
-        """级二 → 级一逐块拷贝（load 方向），返回完成凭据。失败抛异常。"""
+        """级二 → 级一逐块拷贝（load 方向），返回完成凭据。失败抛异常。
+
+        契约（T-5/T-7 编排语义，2026-11-08 910C 真卡冒烟钉死）：**源行按条目
+        的级二记录定位**（`copy_out` 发起时登记的落点行，或 `register_entry`
+        预登记的行），**目标行 = 本次传入的 block_id** —— manager 换入时它是
+        新分配块的行号，与源行是两套编号，不得拿 block_id 同时当 src/dst。
+        未知条目按 T-4 报错不静默，绝不退化为「block_id 当源行」。"""
         self._require_bound()
-        return self._launch(block_id, block_id, is_store=False)
+        src_row = self._tier2_entries.get(entry_id)
+        if src_row is None:
+            raise TierError(
+                f"换入条目 {entry_id} 无级二落点记录：copy_in 源行必须按条目定位"
+                "（copy_out 发起登记 / register_entry 预登记），未知条目不静默退化"
+                "为 block_id 当源行（T-4）；请先对该条目发起换出或预登记。"
+            )
+        return self._launch(src_row, block_id, is_store=False)
 
     def confirm(self, ticket: Any) -> bool:
         """事件适配器（T-6 第 4 步口径）：不裸调厂商事件查询之外的东西。"""
@@ -173,7 +194,10 @@ class NpuTierBackend:
         self._bound = True
 
     def register_entry(self, entry_id: str, block_id: int) -> None:
-        """级二账本账面登记（真账本在 manager；此处供 drop_entry 对账）。"""
+        """外部预登记条目的级二落点行（真账本在 manager）。
+
+        供调用方在 copy_out 之外先行登记（如宿主接管既有级二副本）；随后同
+        条目的 copy_out 会以实际发起落点覆盖本登记。"""
         self._tier2_entries[entry_id] = block_id
 
     def shutdown(self) -> None:

@@ -11,6 +11,10 @@
 # 池的 15 条对外接口不在这里（见 pool.pyi）；分层存储只调用、不改它们（设计 6.2）。
 # 管理器本体不 import 推理框架与 offload 实现（T-5）；芯片差异只许出现在
 # TierBackendCapability 与后端实现里。
+#
+# 异步在途轨增量（2026-11）：evict_async / promote_async / poll_transfers /
+# query_transfers 与级三留位处置口 apply_r13_disposition 加进存根——
+# 同步轨（evict / promote）签名一字不动，增量演化不破坏既有签名。
 
 from typing import Any, Iterable, Protocol, runtime_checkable
 
@@ -30,6 +34,16 @@ class TierLevel:
     TIER1: str
     TIER2: str
     TIER3: str
+
+class TransferDirection:
+    EVICT: str
+    PROMOTE: str
+
+class TransferState:
+    PENDING: str
+    TIMED_OUT: str
+    CONFIRMED: str
+    FAILED: str
 
 class TierBackendCapability:
     transfer_granularity_bytes: int
@@ -80,9 +94,17 @@ class TierRegistration: ...
 class TierCapabilityView: ...
 class TierAuditView: ...
 class TierDestroyReport: ...
+class TransferTicket: ...
+class TransferOutcome: ...
+class TransferPollReport: ...
+class AsyncEvictReceipt: ...
+class AsyncPromoteReceipt: ...
+class Tier3DispositionReport: ...
 
 class TierManager:
-    """分层存储管理器本体。10 条操作里的 2..10 是这个类的方法，第 1 条是 create_tier_manager。"""
+    """分层存储管理器本体。10 条操作里的 2..10 是这个类的方法，第 1 条是 create_tier_manager；
+    异步在途轨（evict_async / promote_async / poll_transfers / query_transfers）与
+    级三留位处置口（apply_r13_disposition）是同步轨之外的增量操作面。"""
 
     @property
     def destroyed(self) -> bool: ...
@@ -117,6 +139,19 @@ class TierManager:
         """换出六步：账本先落级二后 free_block（T-7）；未达目标如实标注（T-4）。"""
         ...
 
+    # —— 5a：异步换出（发起即返回，完成确认后才变更归属）——
+    def evict_async(
+        self,
+        candidates: Iterable[int],
+        *,
+        target_bytes: int | None = ...,
+        pressure: PressureLevel | None = ...,
+        stream_id: int | None = ...,
+        allow_bypass_min_residency: bool = ...,
+    ) -> AsyncEvictReceipt:
+        """发起即在途账本立账；条目落账/还块推迟到 poll_transfers 的完成确认（T-7）。"""
+        ...
+
     # —— 6：换入 ——
     def promote(
         self,
@@ -127,6 +162,33 @@ class TierManager:
         prefetch: bool = ...,
     ) -> PromoteResult | CooldownRejected | PrefetchNotTriggered:
         """换入五步：完成确认后才交块（T-7）；池容量不足报错不许当未命中（T-4）。"""
+        ...
+
+    # —— 6a：异步换入（发起即返回，完成确认后才交块）——
+    def promote_async(
+        self,
+        entry_id: str,
+        *,
+        stream_id: int | None = ...,
+        keep_tier2_copy: bool = ...,
+        prefetch: bool = ...,
+    ) -> AsyncPromoteReceipt | CooldownRejected | PrefetchNotTriggered:
+        """块向池预留但不交块；块标识与底座引用在完成确认时交付（T-7 第 5 步）。"""
+        ...
+
+    # —— 异步在途轨：轮询与在途账本查询 ——
+    def poll_transfers(self) -> TransferPollReport:
+        """一次非阻塞轮询：确认 ⇒ 变更归属（换出落账还块 / 换入交块）；
+        未确认仍在途；confirm 抛错 ⇒ 按 3.5 回收。超时是可恢复态（T-7）。"""
+        ...
+
+    def query_transfers(self, *, entry_id: str | None = ...) -> tuple[TransferTicket, ...]:
+        """在途账本的可查视图（「在途」状态与跟踪），可按条目过滤。"""
+        ...
+
+    # —— 级三留位：R13 处置口（设计第八节第 2 条，只定位置不承诺实现）——
+    def apply_r13_disposition(self) -> Tier3DispositionReport:
+        """级二高水位 ⇒ 本应换出到级三；级三未实现 ⇒ 按级二淘汰策略丢弃并计审计。"""
         ...
 
     # —— 7：三级水位 ——
@@ -141,7 +203,7 @@ class TierManager:
 
     # —— 9：搬运审计 ——
     def query_tier_audit(self) -> TierAuditView:
-        """换入换出计数、抖动四件触发数、越窗换出、级三缺失丢弃。"""
+        """换入换出计数、抖动四件触发数、越窗换出、级三缺失丢弃、在途重复调度拒绝。"""
         ...
 
     # —— 10：改阈值与窗口 ——

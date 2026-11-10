@@ -28,8 +28,13 @@ def test_真connector懒加载与全链路搬运闭环():
     dev = torch.device("npu:0")
     torch.npu.set_device(dev)
     n_blocks, block_bytes = 4, 4096
-    gpu = torch.arange(n_blocks * block_bytes, dtype=torch.int8, device=dev).view(
-        n_blocks, block_bytes
+    # 本栈 aclnnArange 不支持 DT_INT8 输出（支持列表 FP16/FP32/FP64/INT64/
+    # INT32/BF16，2026-11-08 910C 真卡实测）—— int32 构造再 cast，与 PPU 用例
+    # 数据准备同款路线，判据不变。
+    gpu = (
+        torch.arange(n_blocks * block_bytes, dtype=torch.int32, device=dev)
+        .to(torch.int8)
+        .view(n_blocks, block_bytes)
     )
     cpu = torch.zeros(n_blocks, block_bytes, dtype=torch.int8, pin_memory=True)
     load_stream = torch.npu.Stream()
@@ -53,17 +58,23 @@ def test_真connector懒加载与全链路搬运闭环():
             break
         torch.npu.synchronize(dev)
     assert adapter.confirm(ticket) is True
-    assert torch.equal(cpu[2], gpu[2])
+    # 本栈 torch.equal 不支持跨设备（静默 False，PPU 栈同款环境事实）：
+    # 比较取回主机侧，逐字节相等判据不变。
+    assert torch.equal(cpu[2], gpu[2].cpu())
 
-    # H2D（换入方向）
-    cpu[3] = 42
+    # H2D（换入方向）：源行 = 条目 e1 的级二落点行（copy_out 发起时登记的行 2），
+    # 目标行 = 新块号 3 —— 两套编号，copy_in 不得拿 block_id 当源行（契约见
+    # npu_backend.copy_in docstring）。判据较旧版更强：目标行拿到的必须是条目
+    # 源行内容，block_id 行保持全零以证未误读。
+    cpu[2] = 42  # 在条目真正的级二副本行上改数（cpu[3] 不写，保持全零）
     ticket = adapter.copy_in("e1", 3, block_bytes, stream_id=0)
     for _ in range(1000):
         if adapter.confirm(ticket):
             break
         torch.npu.synchronize(dev)
     assert adapter.confirm(ticket) is True
-    assert torch.equal(gpu[3], cpu[3])
+    assert torch.equal(gpu[3].cpu(), cpu[2])
+    assert not bool(cpu[3].any())  # block_id 行未被读作源
 
     adapter.drop_entry("e1")
     adapter.shutdown()
