@@ -1,6 +1,6 @@
 """平头哥 PPU 接线层的真卡用例 —— **要卡**，默认不跑。
 
-跑法（PTG_0 一次性容器，PPU 0 号卡，仓根在 PYTHONPATH 上）：
+跑法（PPU 真机一次性容器，PPU 0 号卡，仓根在 PYTHONPATH 上）：
 
     docker run --rm --device /dev/alixpu_ppu0 --device /dev/alixpu \
         --device /dev/alixpu_ctl -v <repo>:/ws -w /ws \

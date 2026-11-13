@@ -21,7 +21,7 @@ PPU 栈已知事实（钉进本头注释，栈级差异的判据依据）：
 - copy_in 源行按条目级二落点行定位（2026-11-10 同构核查修复：与昇腾 b3fa22b /
   昆仑芯 f793a56 同款缺陷），目标行 = 新块号行，两套编号不得混用。
 
-跑法（PTG_0 一次性容器，PPU 0 号卡，仓根在 PYTHONPATH 上）：
+跑法（PPU 真机一次性容器，PPU 0 号卡，仓根在 PYTHONPATH 上）：
 
     docker run --rm --network none --device /dev/alixpu_ppu0 --device /dev/alixpu \
         --device /dev/alixpu_ctl -v <repo>:/ws:ro -w /ws -e PYTHONPATH=/ws \
