@@ -14,6 +14,7 @@ import warnings
 import pytest
 
 ALIASES = {
+    "offload.mlu_offload": ("MluSimpleCPUOffloadConnector", "flagmemory.tiering.offload.mlu"),
     "offload.npu_offload": ("NpuSimpleCPUOffloadConnector", "flagmemory.tiering.offload.npu"),
     "offload.ppu_offload": ("PpuSimpleCPUOffloadConnector", "flagmemory.tiering.offload.ppu"),
     "offload.xpu_offload": ("XpuSimpleCPUOffloadConnector", "flagmemory.tiering.offload.xpu"),
@@ -30,7 +31,7 @@ class TestNormal:
 
     def test_别名包可import(self):
         mod = importlib.import_module("offload")
-        assert set(mod.__all__) == {"npu_offload", "ppu_offload", "xpu_offload"}
+        assert set(mod.__all__) == {"mlu_offload", "npu_offload", "ppu_offload", "xpu_offload"}
 
     @pytest.mark.parametrize("alias", sorted(ALIASES))
     def test_别名子包可import且不触发栈依赖(self, alias):

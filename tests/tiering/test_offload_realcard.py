@@ -1,6 +1,6 @@
-"""三套 KV 卸载栈的真导入 —— **要卡**，默认不跑。
+"""四套 KV 卸载栈的真导入 —— **要卡**，默认不跑。
 
-跑法（在带卡机器的宿主栈容器内，一次只有一套栈能通过，另两套的宿主栈版本不同）：
+跑法（在带卡机器的宿主栈容器内，一次只有一套栈能通过，另三套的宿主栈版本不同）：
 
     pytest -m realcard tests/tiering/test_offload_realcard.py
 
@@ -18,6 +18,7 @@ STACKS = [
     ("flagmemory.tiering.offload.npu", "offload.npu_offload", "NpuSimpleCPUOffloadConnector"),
     ("flagmemory.tiering.offload.ppu", "offload.ppu_offload", "PpuSimpleCPUOffloadConnector"),
     ("flagmemory.tiering.offload.xpu", "offload.xpu_offload", "XpuSimpleCPUOffloadConnector"),
+    ("flagmemory.tiering.offload.mlu", "offload.mlu_offload", "MluSimpleCPUOffloadConnector"),
 ]
 
 

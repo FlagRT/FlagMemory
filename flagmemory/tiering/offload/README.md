@@ -1,4 +1,4 @@
-# flagmemory/tiering/offload/ —— KV→Host 卸载 connector（三栈）
+# flagmemory/tiering/offload/ —— KV→Host 卸载 connector（四栈）
 
 分层存储下的**框架绑定适配层**，经 vLLM `kv_connector_module_path` 外挂加载，不改任何栈代码。
 池本体不经过这里，也不反向依赖这里。
@@ -10,11 +10,12 @@
 |---|---|---|---|---|
 | `npu/` | Ascend 910C · vllm-ascend v0.20.2rc1 | `NpuSimpleCPUOffloadConnector` | `flagmemory.tiering.offload.npu` | W2 闭环 + W3 开关对照（2026-10-14 报告） |
 | `xpu/` | 昆仑 P800 · vllm-plugin-fl 0.2.0 | `XpuSimpleCPUOffloadConnector` | `flagmemory.tiering.offload.xpu` | 四步闭环（2026-10-23）+ 真卡三件（2026-11-09）；运行环境已定档（ADR-0026），见 `xpu/RUNBOOK.md` |
+| `mlu/` | 寒武纪 MLU590 · flagos-app vllm0.20.2（vllm-plugin-FL 0.2.2） | `MluSimpleCPUOffloadConnector` | `flagmemory.tiering.offload.mlu` | connector 冒烟六判据 SMOKE PASS（2026-11-13）+ realcard import；host 契约 13 例；运行环境已定档，见 `mlu/RUNBOOK.md` |
 | `ppu/` | PPU ZW810E · vllm-plugin-fl 0.3.0 + vllm 0.24.0 | `PpuSimpleCPUOffloadConnector` | `flagmemory.tiering.offload.ppu` | 冒烟闭环 + A/B 对照（2026-10-26）：池内零代价、超池 200% +2.1%；真模型待排 |
 
-旧模块路径 `offload.{npu,ppu,xpu}_offload` 由仓根兼容别名包转发，0.2.x 等效可用、0.3.0 移除。
+旧模块路径 `offload.{mlu,npu,ppu,xpu}_offload` 由仓根兼容别名包转发，0.2.x 等效可用、0.3.0 移除。
 
-`npu`/`xpu` 两包同构：connector（swap worker_handler）+ worker（KV 张量归一/
+`npu`/`xpu`/`mlu` 三包同构：connector（swap worker_handler）+ worker（KV 张量归一/
 Host 池）+ copy_backend（守护线程 + 逐块 `copy_(non_blocking=True)` + Event 完成上报）+
 mem_ops（锁页/降级）。差异只在芯片 API 面（torch.npu vs torch.cuda）与各栈 KV cache 交付格式。
 
@@ -104,15 +105,18 @@ logger，本包的 logger 输出会被吞，所以诊断走 stderr。
 | Ascend 910C（npu） | 已接 TierBackend 协议面（协议形状 / 能力声明映射 / 降级登记 / 注册路径主机可验；真卡闭环用例带 realcard 标记，跑卡窗口另排） | `flagmemory/tiering/backends/npu_backend.py` |
 | 昆仑 P800（xpu） | 已接 TierBackend 协议面（协议形状 / 能力声明映射 / 降级登记 / 注册路径主机可验；真卡闭环用例带 realcard 标记，跑卡窗口另排） | `flagmemory/tiering/backends/xpu_backend.py` |
 | PPU ZW810E（ppu） | 已接 TierBackend 协议面（协议形状 / 能力声明映射 / 降级登记 / 注册路径主机可验；真卡闭环用例 `tests/tiering/test_ppu_backend_realcard.py` 于 2026-11-06 在 PTG_0 PPU 0 号卡通过） | `flagmemory/tiering/backends/ppu_backend.py` |
+| 寒武纪 MLU590（mlu） | 已接 TierBackend 协议面（协议形状 / 能力声明映射 / 降级登记 / 注册路径主机可验；真卡闭环用例 `tests/tiering/test_mlu_backend_realcard.py` 于 2026-11-13 在 MLU590 通过） | `flagmemory/tiering/backends/mlu_backend.py` |
 
-三栈全接（npu / xpu / ppu）。接线方向（设计 T-5）：外部把适配层包成 `TierBackend` 注册给 manager
-（`register_npu_tier_backend` / `register_xpu_tier_backend` / `register_ppu_tier_backend`）；manager 本体不 import offload 实现与接线层，
+四栈全接（npu / xpu / ppu / mlu）。接线方向（设计 T-5）：外部把适配层包成 `TierBackend` 注册给 manager
+（`register_npu_tier_backend` / `register_xpu_tier_backend` / `register_ppu_tier_backend` / `register_mlu_tier_backend`）；manager 本体不 import offload 实现与接线层，
 connector 经推理引擎 KV 外挂点的加载方式不变。能力按本 README 与
 `npu/RUNBOOK.md` 登记的实测事实填：批量搬运原语无（声明即降级态）、锁页声明支持
 （注册时实测试锁，探测不到按降级登记上报）、搬运粒度以 bind 时 connector 推导
 值为准（npu 未 bind 用 OneRec-8B @910C 实例值 ≈2.2 MiB/块；xpu 未 bind 用
 P800 实测分配粒度实例值 2 MiB = `flagmemory.pool.KUNLUN_P800_INSTANCE_TIER_SPEC.base_bytes`；
-ppu 未 bind 用 PPU 栈实例值 512 KiB/块 = `PPU_ZW810E_INSTANCE_BLOCK_BYTES`）。条目级访问统计
+ppu 未 bind 用 PPU 栈实例值 512 KiB/块 = `PPU_ZW810E_INSTANCE_BLOCK_BYTES`；
+mlu 未 bind 用 MLU 栈实例值 8 KiB = `MLU590_INSTANCE_BLOCK_BYTES`，设备面一律 `torch.mlu.*`——
+torch_mlu 不补 torch.cuda 面（`torch.cuda.is_available()` 恒 False，四栈独有））。条目级访问统计
 connector 不提供，恒按「取不到 → 退用其余判据并标降级」处置。
 
 xpu 接线层特有：能力探测面一律按 `torch.cuda.*` API 写（torch_xmlir 符号重写映射到 XPU），`torch.xpu.*` 恒不可用（见上文「XPU 栈 API 面事实」节）。
@@ -120,3 +124,8 @@ xpu 接线层特有：能力探测面一律按 `torch.cuda.*` API 写（torch_xm
 ppu 接线层特有：锁页按 P-3 三级降级链探测登记（`cudaHostRegister` → `pin_memory()` → 不锁页，探到哪级按哪级登记，级别名存 `probed_pinned_level`）；完成确认按设计 §4.1 第 4 条事件适配器——该栈未 record 事件原生查询返回「已完成」（2026-11-06 PTG_0 真卡复现），凭据不在事件表内一律 False。
 
 xpu 接线层特有：能力探测面一律按 `torch.cuda.*` API 写（torch_xmlir 符号重写映射到 XPU），`torch.xpu.*` 恒不可用（见上文「XPU 栈 API 面事实」节）。
+
+<!-- changelog
+2026-11-13  新增 mlu/ 子包（寒武纪 MLU590 KV→Host 卸载 connector：导出类 MluSimpleCPUOffloadConnector，kv_connector_module_path=flagmemory.tiering.offload.mlu，旧路径 offload.mlu_offload 别名转发）；MLU590 真卡 connector 冒烟六判据通过、host 全量 909 passed 零回归；运行环境定档（flagos-app vllm0.20.2-cambricon 镜像 digest 锚）见 mlu/RUNBOOK.md。
+2026-11-13  「分层存储接线现状」表补寒武纪行（backends/mlu_backend.py 已在公共线、表格缺行先于本次存在）：四栈全接口径；注册函数列表与未 bind 粒度实例值补 mlu 项（MLU590_INSTANCE_BLOCK_BYTES = 8 KiB），并就近登记该栈设备面独有事实（torch_mlu 不补 torch.cuda 面，设备 API 一律 torch.mlu.*）。
+-->
