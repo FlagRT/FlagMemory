@@ -4,6 +4,8 @@
 2026-11-06 已对齐现行池接口（DeviceBackend 的 validate_stream_device、BaseAllocator 的
 目标流关键字、租约撤销/复用换号语义），在昆仑芯 P800 真卡（operator-runtime 镜像、
 torch_xmlir 符号重写面）上 11/11 通过；昇腾侧另有独立入口（test_pool_ascend_realcard）。
+2026-11-13 寒武纪 MLU590 真卡实例：置 FLAGMEMORY_REALCARD_STACK=mlu 后同套件 11/11
+通过（基座 neuware4.4.3 镜像；torch_mlu 不补 torch.cuda 面，适配见文件内 STACK 段）。
 
 SDK 原语调查只提供候选证据：指挥台仓
 inbox/调研-四芯片SDK显存原语面补探-20261103.md；它不证明本适配器满足运行语义。
@@ -46,6 +48,17 @@ if (os.environ.get("FLAGMEMORY_ENABLE_LEGACY_CUDA") != "I_ACCEPT_LEGACY_RISKS"
 torch = None  # imported only in the explicitly enabled fixture
 
 DEVICE_INDEX = int(os.environ.get("FLAGMEMORY_REALCARD_DEVICE", "0"))
+
+#: —— 测试侧栈适配：寒武纪 MLU（2026-11-13 真卡实测）——
+#: npu（torch_npu 接管 torch.cuda）/ xpu（torch_xmlir 符号重写）先例栈自带 torch.cuda
+#: 兼容面，本文件原样可跑。torch_mlu 不给 torch.cuda 打补丁（实测 is_available() 为
+#: False），但 torch.mlu 是同族完整面（set_device / current_device / mem_get_info /
+#: memory_reserved / empty_cache / Stream / Event / current_stream / stream / 设备串
+#: "mlu:N" 逐项真卡实测可用；未 record 事件原生 query 误报 True，与本套件 I-2 预期一致）。
+#: 显式置 FLAGMEMORY_REALCARD_STACK=mlu 时：device_index 夹具里把 torch.cuda 切到
+#: torch.mlu，设备串前缀用 mlu；不置则与 npu/xpu/ppu 三家先例完全一致（默认 cuda）。
+STACK = os.environ.get("FLAGMEMORY_REALCARD_STACK", "")
+DEVICE_PREFIX = "mlu" if STACK == "mlu" else "cuda"
 
 #: 默认仅打印；非空才写指定路径。调用方须显式选仓外路径，代码不自动验证该边界。
 #: reports 仍含历史证据，迁移尚未收口。
@@ -144,7 +157,7 @@ class RealCardAllocator:
         try:
             with torch.cuda.stream(stream):
                 tensor = torch.empty(
-                    nbytes, dtype=torch.int8, device=f"cuda:{device_index}"
+                    nbytes, dtype=torch.int8, device=f"{DEVICE_PREFIX}:{device_index}"
                 )
         except RuntimeError as exc:
             if "out of memory" in str(exc).lower():
@@ -171,7 +184,7 @@ def measure_granularity(device_index: int, probe_bytes: int = 1) -> tuple[int, i
     """
     torch.cuda.empty_cache()
     before = torch.cuda.memory_reserved(device_index)
-    probe = torch.empty(probe_bytes, dtype=torch.int8, device=f"cuda:{device_index}")
+    probe = torch.empty(probe_bytes, dtype=torch.int8, device=f"{DEVICE_PREFIX}:{device_index}")
     after = torch.cuda.memory_reserved(device_index)
     del probe
     torch.cuda.empty_cache()
@@ -190,6 +203,9 @@ def measure_granularity(device_index: int, probe_bytes: int = 1) -> tuple[int, i
 def device_index() -> int:
     global torch
     import torch as torch_module
+    if STACK == "mlu":
+        import torch_mlu  # noqa: F401  # 该栈须显式加载，torch.mlu 面才存在
+        torch_module.cuda = torch_module.mlu  # cuda 族引用切 mlu 面（见 STACK 适配段）
     torch = torch_module
     if not torch.cuda.is_available() or torch.cuda.device_count() <= DEVICE_INDEX:
         pytest.skip(f"这台机器上取不到 {DEVICE_INDEX} 号卡")
@@ -269,7 +285,7 @@ class TestNormal:
 
         # 在那条流上真排一点活，再归还 —— 屏障必须等这条流上的操作跑完才放行
         with torch.cuda.stream(side):
-            torch.empty(1 << 20, dtype=torch.int8, device=f"cuda:{DEVICE_INDEX}")
+            torch.empty(1 << 20, dtype=torch.int8, device=f"{DEVICE_PREFIX}:{DEVICE_INDEX}")
 
         assert real_pool.free_block(view.block_id).state is BlockState.PENDING_RECYCLE
         result = real_pool.drain_stream(timeout_s=5.0)
