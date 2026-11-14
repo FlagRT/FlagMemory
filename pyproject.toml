@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flagmemory"
-version = "0.2.0"
+version = "0.3.0"
 description = "FlagMemory: 显存池管理器组件——池本体 / 芯片能力抽象 / 分层存储（含三栈 KV 卸载）/ 性能分析工具 / 接口声明"
 requires-python = ">=3.10"
 # 刻意零依赖：torch / vLLM 由宿主栈环境自带（各芯片容器的版本互不兼容），
