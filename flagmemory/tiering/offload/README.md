@@ -11,7 +11,7 @@
 | `npu/` | Ascend 910C · vllm-ascend v0.20.2rc1 | `NpuSimpleCPUOffloadConnector` | `flagmemory.tiering.offload.npu` | W2 闭环 + W3 开关对照（2026-10-14 报告）+ 冒烟六判据 SMOKE PASS（2026-11-14）+ realcard import；运行环境已定档（910C 推理腿镜像），见 `npu/RUNBOOK.md` |
 | `xpu/` | 昆仑 P800 · vllm-plugin-fl 0.2.0 | `XpuSimpleCPUOffloadConnector` | `flagmemory.tiering.offload.xpu` | 四步闭环（2026-10-23）+ 真卡三件（2026-11-09）；运行环境已定档（ADR-0026），见 `xpu/RUNBOOK.md` |
 | `mlu/` | 寒武纪 MLU590 · flagos-app vllm0.20.2（vllm-plugin-FL 0.2.2） | `MluSimpleCPUOffloadConnector` | `flagmemory.tiering.offload.mlu` | connector 冒烟六判据 SMOKE PASS（2026-11-13）+ realcard import；host 契约 13 例；运行环境已定档，见 `mlu/RUNBOOK.md` |
-| `ppu/` | PPU ZW810E · vllm-plugin-fl 0.3.0 + vllm 0.24.0 | `PpuSimpleCPUOffloadConnector` | `flagmemory.tiering.offload.ppu` | 冒烟闭环 + A/B 对照（2026-10-26）：池内零代价、超池 200% +2.1%；真模型待排 |
+| `ppu/` | PPU ZW810E · vllm-plugin-fl 0.3.0 + vllm 0.24.0 | `PpuSimpleCPUOffloadConnector` | `flagmemory.tiering.offload.ppu` | connector 冒烟六判据 SMOKE PASS（2026-11-14）+ realcard import；旧线 A/B 对照（2026-10-26）：池内零代价、超池 200% +2.1%（真模型待排）；运行环境已定档，见 `ppu/RUNBOOK.md` |
 
 旧模块路径 `offload.{mlu,npu,ppu,xpu}_offload` 由仓根兼容别名包转发，0.2.x 等效可用、0.3.0 移除。
 
@@ -126,6 +126,7 @@ ppu 接线层特有：锁页按 P-3 三级降级链探测登记（`cudaHostRegis
 xpu 接线层特有：能力探测面一律按 `torch.cuda.*` API 写（torch_xmlir 符号重写映射到 XPU），`torch.xpu.*` 恒不可用（见上文「XPU 栈 API 面事实」节）。
 
 <!-- changelog
+2026-11-14  ppu/ 子包运行环境定档（FlagRelease vllm0.24 发布线镜像，digest 锚）+ connector 冒烟六判据 SMOKE PASS（2026-11-14 真卡）：见 ppu/RUNBOOK.md；thead-ppu-runtime v2（vllm 0.19 线）内 connector 环境性不可用，已在该 RUNBOOK 登记。
 2026-11-13  新增 mlu/ 子包（寒武纪 MLU590 KV→Host 卸载 connector：导出类 MluSimpleCPUOffloadConnector，kv_connector_module_path=flagmemory.tiering.offload.mlu，旧路径 offload.mlu_offload 别名转发）；MLU590 真卡 connector 冒烟六判据通过、host 全量 909 passed 零回归；运行环境定档（flagos-app vllm0.20.2-cambricon 镜像 digest 锚）见 mlu/RUNBOOK.md。
 2026-11-13  「分层存储接线现状」表补寒武纪行（backends/mlu_backend.py 已在公共线、表格缺行先于本次存在）：四栈全接口径；注册函数列表与未 bind 粒度实例值补 mlu 项（MLU590_INSTANCE_BLOCK_BYTES = 8 KiB），并就近登记该栈设备面独有事实（torch_mlu 不补 torch.cuda 面，设备 API 一律 torch.mlu.*）。
 2026-11-14  npu/ 运行环境定档入 RUNBOOK §0（910C 推理腿镜像 quay.io/ascend/vllm-ascend:v0.20.2rc1-a3，digest 与 stack.lock.910c.v4 lock.infer 一致）；910C 真卡 connector 冒烟六判据 SMOKE PASS + realcard import 1/1 + host 全量 909 passed 零回归。
