@@ -15,11 +15,9 @@
     interfaces ← pool ← caps          池本体与能力层都不碰框架
     tiering.offload → pool / caps     适配层可以向下用，反向不行
 
-import 路径是 flagmemory.*；旧的 offload.* 作为兼容别名保留一个版本（0.2.x 有效，
-0.3.0 移除），见 offload/__init__.py。
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # 顶层刻意不做任何子包的 eager import：tiering.offload 需要宿主栈的 torch / vLLM，
 # 而池本体必须在无框架、无真卡的环境里可导入（单测与分层门禁都依赖这一点）。

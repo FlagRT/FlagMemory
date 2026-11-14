@@ -15,19 +15,15 @@ import importlib
 import pytest
 
 STACKS = [
-    ("flagmemory.tiering.offload.npu", "offload.npu_offload", "NpuSimpleCPUOffloadConnector"),
-    ("flagmemory.tiering.offload.ppu", "offload.ppu_offload", "PpuSimpleCPUOffloadConnector"),
-    ("flagmemory.tiering.offload.xpu", "offload.xpu_offload", "XpuSimpleCPUOffloadConnector"),
-    ("flagmemory.tiering.offload.mlu", "offload.mlu_offload", "MluSimpleCPUOffloadConnector"),
+    ("flagmemory.tiering.offload.npu", "NpuSimpleCPUOffloadConnector"),
+    ("flagmemory.tiering.offload.ppu", "PpuSimpleCPUOffloadConnector"),
+    ("flagmemory.tiering.offload.xpu", "XpuSimpleCPUOffloadConnector"),
+    ("flagmemory.tiering.offload.mlu", "MluSimpleCPUOffloadConnector"),
 ]
 
 
 @pytest.mark.realcard
-@pytest.mark.parametrize("new_path,alias_path,class_name", STACKS)
-def test_栈可导入且新旧路径取到同一个类(new_path, alias_path, class_name):
-    new_mod = importlib.import_module(new_path)
-    new_cls = getattr(new_mod, class_name)
-    alias_mod = importlib.import_module(alias_path)
-    with pytest.warns(DeprecationWarning):
-        alias_cls = getattr(alias_mod, class_name)
-    assert alias_cls is new_cls
+@pytest.mark.parametrize("path,class_name", STACKS)
+def test_栈可导入且取到导出类(path, class_name):
+    mod = importlib.import_module(path)
+    assert getattr(mod, class_name) is not None

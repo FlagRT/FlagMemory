@@ -33,8 +33,7 @@ vllm serve <MODEL_DIR> \
   --kv-transfer-config '{"kv_connector":"MluSimpleCPUOffloadConnector","kv_connector_module_path":"flagmemory.tiering.offload.mlu","kv_connector_extra_config":{"cpu_bytes_to_use":8589934592}}'
 ```
 
-- 工厂机制：`kv_connector_module_path` 存在时 `importlib` 动态加载，无需注册动作；旧路径
-  `offload.mlu_offload` 由兼容别名转发（0.2.x 有效，0.3.0 移除）。
+- 工厂机制：`kv_connector_module_path` 存在时 `importlib` 动态加载，无需注册动作。
 - 设备纪律同寒武纪基座口径（stack.lock.cambricon.v1）：cnmon 挑空闲卡 +
   `MLU_VISIBLE_DEVICES` 自律；`import triton` 必须在 `import torch_mlu` 之后（C-3）；
   容器内执行一律经 `bash -lc`（/opt/triton 只在 shell 启动时进 PYTHONPATH）。
