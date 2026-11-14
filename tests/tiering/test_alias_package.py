@@ -25,6 +25,21 @@ HOST_STACK_PRESENT = all(
     importlib.util.find_spec(name) is not None for name in ("torch", "vllm")
 )
 
+#: 各别名的**额外**宿主栈符号（公共面 torch/vllm 之外）：mlu 设备面绑 torch_mlu
+#: （torch_mlu 不补 torch.cuda 面）。混合栈环境（torch+vllm 在位而 torch_mlu 缺，
+#: 如 PPU vllm0.24 镜像，2026-11-14 实测）里 mlu 取类抛 ModuleNotFoundError 是
+#: 预期路径，不是回归——按逐别名探测判「宿主栈在不在」。
+_EXTRA_STACK_MODULES = {"offload.mlu_offload": ("torch_mlu",)}
+
+
+def _stack_present(alias: str) -> bool:
+    if not HOST_STACK_PRESENT:
+        return False
+    return all(
+        importlib.util.find_spec(m) is not None
+        for m in _EXTRA_STACK_MODULES.get(alias, ())
+    )
+
 
 class TestNormal:
     """正常：别名包与三个别名子包本身可 import，且不触发栈依赖。"""
@@ -50,10 +65,10 @@ class TestNormal:
                 obtained = getattr(mod, expected_class)
             except ModuleNotFoundError as exc:
                 # 无宿主栈环境的预期路径：警告必须已经发出，异常类型必须是 ModuleNotFoundError。
-                assert not HOST_STACK_PRESENT, f"宿主栈在位却报 {exc}"
+                assert not _stack_present(alias), f"宿主栈在位却报 {exc}"
                 obtained = None
             else:
-                assert HOST_STACK_PRESENT
+                assert _stack_present(alias)
                 assert isinstance(obtained, type)
         messages = [str(w.message) for w in caught if w.category is DeprecationWarning]
         assert messages, f"{alias} 取类没发 DeprecationWarning（obtained={obtained!r}）"
@@ -99,7 +114,7 @@ class TestError:
         mod = importlib.import_module(alias)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
-            if HOST_STACK_PRESENT:
+            if _stack_present(alias):
                 assert isinstance(getattr(mod, expected_class), type)
             else:
                 with pytest.raises(ModuleNotFoundError):
