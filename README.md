@@ -8,7 +8,7 @@
 |---|---|
 | `flagmemory/pool/` | 已实现自管分级块池、当前租约访问、流序回收及可恢复关闭托管；主机回归可运行；存在昇腾小池生命周期及真实模型输入消费的已验证实例，范围见下文 |
 | `flagmemory/caps/` | 统一能力协议、分级与降级查询 |
-| `flagmemory/tiering/offload/` | 框架绑定的三套 KV→Host 卸载适配器；尚未成为池的业务消费方 |
+| `flagmemory/tiering/offload/` | 框架绑定的四套 KV→Host 卸载适配器；尚未成为池的业务消费方 |
 | `flagmemory/profiling/probes/` | 随包分发的脚本集，按各目录说明调用，不作为稳定模块 API |
 | `flagmemory/interfaces/` | 类型存根及接口文档；语言面已定稿（ADR-0015，2026-11-05）：类型存根 + 接口文档，C 头触发式 |
 | `docs/design/` | 池与分层存储设计；通用分层管理器和原生优化尚未实现 |
@@ -23,7 +23,7 @@ pip install -e .
 
 包不替宿主栈选择 torch/vLLM 版本，池与能力层可在无框架、无卡环境导入。现行建池、租约访问与调用方别名责任见 [实现说明](docs/impl/11-28-分级块池与流有序分配.md)；接口契约见 [接口文档](flagmemory/interfaces/接口文档-显存池对外接口.md)。
 
-卸载 connector 的模块分别为 `flagmemory.tiering.offload.npu`、`.xpu`、`.ppu`；具体类、栈要求与配置见 [卸载使用说明](flagmemory/tiering/offload/README.md)。旧 `offload.*` 为发出弃用警告的兼容别名，新增调用使用正式路径。三栈卸载结果不能作为池接入的运行证据。
+卸载 connector 的模块分别为 `flagmemory.tiering.offload.npu`、`.xpu`、`.ppu`、`.mlu`；具体类、栈要求与配置见 [卸载使用说明](flagmemory/tiering/offload/README.md)。四栈卸载结果不能作为池接入的运行证据。
 
 ## 检查与证据
 

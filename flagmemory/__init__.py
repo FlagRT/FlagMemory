@@ -15,8 +15,6 @@
     interfaces ← pool ← caps          池本体与能力层都不碰框架
     tiering.offload → pool / caps     适配层可以向下用，反向不行
 
-import 路径是 flagmemory.*；旧的 offload.* 作为兼容别名保留一个版本（0.2.x 有效，
-0.3.0 移除），见 offload/__init__.py。
 """
 
 __version__ = "0.3.0"

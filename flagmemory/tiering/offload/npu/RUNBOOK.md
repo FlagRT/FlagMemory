@@ -3,7 +3,7 @@
 > 现行模块路径 `flagmemory.tiering.offload.npu`（导出类 `NpuSimpleCPUOffloadConnector`，
 > vLLM 0.20.2 `SimpleCPUOffloadConnector` 的昇腾适配：scheduler 侧原样继承，worker 侧换
 > `NpuSimpleCPUOffloadWorker`——vllm-ascend 的 (k,v) 元组交付与纯 CUDA copy backend 两死点
-> 构造性规避）。旧路径 `offload.npu_offload` 由兼容别名转发（0.2.x 有效，0.3.0 移除），更早的
+> 构造性规避）。更早的
 > `w2_npu_offload` 仅存在于历史报告引用中。实验结论见 dev-1.0
 > `dev/memory/docs/goals/proto-910c-202610/` 两报告。
 

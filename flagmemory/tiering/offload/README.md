@@ -126,6 +126,7 @@ ppu 接线层特有：锁页按 P-3 三级降级链探测登记（`cudaHostRegis
 xpu 接线层特有：能力探测面一律按 `torch.cuda.*` API 写（torch_xmlir 符号重写映射到 XPU），`torch.xpu.*` 恒不可用（见上文「XPU 栈 API 面事实」节）。
 
 <!-- changelog
+2026-11-14  v0.3.0 按弃用计划移除 0.2.x 兼容别名包 offload/（顶层旧路径 offload.<栈>_offload 失效，正式路径 flagmemory.tiering.offload.<栈> 不变，realcard 用例改单路径导入）；host 全量 886 passed 零回归。
 2026-11-14  ppu/ 子包运行环境定档（FlagRelease vllm0.24 发布线镜像，digest 锚）+ connector 冒烟六判据 SMOKE PASS（2026-11-14 真卡）：见 ppu/RUNBOOK.md；thead-ppu-runtime v2（vllm 0.19 线）内 connector 环境性不可用，已在该 RUNBOOK 登记。
 2026-11-13  新增 mlu/ 子包（寒武纪 MLU590 KV→Host 卸载 connector：导出类 MluSimpleCPUOffloadConnector，kv_connector_module_path=flagmemory.tiering.offload.mlu，旧路径 offload.mlu_offload 别名转发）；MLU590 真卡 connector 冒烟六判据通过、host 全量 909 passed 零回归；运行环境定档（flagos-app vllm0.20.2-cambricon 镜像 digest 锚）见 mlu/RUNBOOK.md。
 2026-11-13  「分层存储接线现状」表补寒武纪行（backends/mlu_backend.py 已在公共线、表格缺行先于本次存在）：四栈全接口径；注册函数列表与未 bind 粒度实例值补 mlu 项（MLU590_INSTANCE_BLOCK_BYTES = 8 KiB），并就近登记该栈设备面独有事实（torch_mlu 不补 torch.cuda 面，设备 API 一律 torch.mlu.*）。

@@ -57,8 +57,7 @@ vllm serve <MODEL_DIR> \
   --kv-transfer-config '{"kv_connector":"PpuSimpleCPUOffloadConnector","kv_connector_module_path":"flagmemory.tiering.offload.ppu","kv_connector_extra_config":{"cpu_bytes_to_use":8589934592}}'
 ```
 
-- 工厂机制：`kv_connector_module_path` 存在时 importlib 动态加载，无需注册动作；旧路径
-  `offload.ppu_offload` 由兼容别名转发（0.2.x 有效，0.3.0 移除）。
+- 工厂机制：`kv_connector_module_path` 存在时 `importlib` 动态加载，无需注册动作。
 - 服务化启动三件套与栈级已知边界见 `../README.md`「PPU 栈已知边界」节（`--entrypoint
   bash` + `source /usr/local/PPU_SDK/envsetup.sh` + `UMD_PLATFORM_TYPE=1
   HGGC_DRIVER_CANDIDATE=UMD`；发版镜像 plugin dispatch 注册表 bug 的
