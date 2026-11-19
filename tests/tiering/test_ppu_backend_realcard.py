@@ -65,15 +65,18 @@ def test_真connector懒加载与全链路搬运闭环():
     assert adapter.confirm(ticket) is True
     assert torch.equal(cpu[2], gpu[2].cpu())  # 该栈 equal 不支持跨设备，取回主机侧比较
 
-    # H2D（换入方向）
-    cpu[3] = 42
+    # H2D（换入方向）。契约：源行=条目记录行（e1→行 2），目标行=block_id——
+    # 要换入的数据必须写在条目记录的源行（cpu[2]），换行换入新块 gpu[3]。
+    # （2026-11-19 PTG_0 修正：原写法把数据写进 cpu[3] 再断言 gpu[3]==cpu[3]，
+    #   实际拷的是源行 cpu[2]，断言必假——产品行为正确，用例数据行写错。）
+    cpu[2] = 42
     ticket = adapter.copy_in("e1", 3, block_bytes, stream_id=0)
     for _ in range(1000):
         if adapter.confirm(ticket):
             break
         torch.cuda.synchronize(dev)
     assert adapter.confirm(ticket) is True
-    assert torch.equal(gpu[3].cpu(), cpu[3])
+    assert torch.equal(gpu[3].cpu(), cpu[2])  # 换入的新块内容 == 写在源行的数据
 
     adapter.drop_entry("e1")
     adapter.shutdown()
